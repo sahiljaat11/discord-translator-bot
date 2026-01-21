@@ -19,18 +19,9 @@ function loadConfig() {
     
     return {
         channelMappings: {},
-       libreTranslateURL: 'https://translate.argosopentech.com/translate',
+        translationService: 'mymemory',
         adminRoleId: null
     };
-}
-
-function saveConfig() {
-    try {
-        fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
-        console.log('✅ Configuration saved');
-    } catch (error) {
-        console.error('❌ Error saving config:', error.message);
-    }
 }
 
 // ==================== WEB SERVER (RENDER REQUIREMENT) ====================
@@ -103,40 +94,54 @@ const client = new Client({
 // ==================== TRANSLATION FUNCTIONS ====================
 
 /**
- * Translate text using LibreTranslate
+ * Translate text using MyMemory (Free, no API key required)
+ * Supports 500 requests per day per IP
  */
-async function translateWithLibre(text, sourceLang, targetLang) {
+async function translateWithMyMemory(text, sourceLang, targetLang) {
     try {
-        const response = await axios.post(config.libreTranslateURL, {
-            q: text,
-            source: sourceLang,
-            target: targetLang,
-            format: 'text'
-        }, {
+        const response = await axios.get('https://api.mymemory.translated.net/get', {
+            params: {
+                q: text,
+                langpair: `${sourceLang}|${targetLang}`
+            },
             timeout: 10000,
-            headers: { 'Content-Type': 'application/json' }
+            headers: {
+                'User-Agent': 'Discord Translation Bot'
+            }
         });
         
-        return response.data.translatedText;
+        // Check if translation was successful
+        if (response.data.responseStatus !== 200) {
+            throw new Error(`MyMemory error: ${response.data.responseDetails || 'Unknown error'}`);
+        }
+        
+        // Return translated text
+        return response.data.responseData.translatedText;
+        
     } catch (error) {
-        console.error('LibreTranslate error:', error.message);
+        console.error('MyMemory translation error:', error.response?.data || error.message);
         throw error;
     }
 }
 
 /**
- * Main translation function with retry
+ * Main translation function with retry logic
  */
 async function translate(text, sourceLang, targetLang, retryCount = 0) {
     try {
-        return await translateWithLibre(text, sourceLang, targetLang);
+        // Attempt translation
+        return await translateWithMyMemory(text, sourceLang, targetLang);
+        
     } catch (error) {
+        // Retry once if failed
         if (retryCount < 1) {
             console.log('🔄 Retrying translation...');
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
             return translate(text, sourceLang, targetLang, retryCount + 1);
         }
-        throw new Error('Translation service failed');
+        
+        // If both attempts failed, throw error
+        throw new Error('Translation service failed after retry: ' + error.message);
     }
 }
 
