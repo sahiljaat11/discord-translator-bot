@@ -24,6 +24,15 @@ function loadConfig() {
     };
 }
 
+function saveConfig() {
+    try {
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+        console.log('✅ Configuration saved');
+    } catch (error) {
+        console.error('❌ Error saving config:', error.message);
+    }
+}
+
 // ==================== WEB SERVER (RENDER REQUIREMENT) ====================
 const PORT = process.env.PORT || 3000;
 
@@ -95,7 +104,6 @@ const client = new Client({
 
 /**
  * Translate text using MyMemory (Free, no API key required)
- * Supports 500 requests per day per IP
  */
 async function translateWithMyMemory(text, sourceLang, targetLang) {
     try {
@@ -110,12 +118,10 @@ async function translateWithMyMemory(text, sourceLang, targetLang) {
             }
         });
         
-        // Check if translation was successful
         if (response.data.responseStatus !== 200) {
             throw new Error(`MyMemory error: ${response.data.responseDetails || 'Unknown error'}`);
         }
         
-        // Return translated text
         return response.data.responseData.translatedText;
         
     } catch (error) {
@@ -129,18 +135,13 @@ async function translateWithMyMemory(text, sourceLang, targetLang) {
  */
 async function translate(text, sourceLang, targetLang, retryCount = 0) {
     try {
-        // Attempt translation
         return await translateWithMyMemory(text, sourceLang, targetLang);
-        
     } catch (error) {
-        // Retry once if failed
         if (retryCount < 1) {
             console.log('🔄 Retrying translation...');
-            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+            await new Promise(resolve => setTimeout(resolve, 2000));
             return translate(text, sourceLang, targetLang, retryCount + 1);
         }
-        
-        // If both attempts failed, throw error
         throw new Error('Translation service failed after retry: ' + error.message);
     }
 }
@@ -169,38 +170,31 @@ function isAdmin(member) {
 // ==================== MESSAGE HANDLER ====================
 
 client.on('messageCreate', async (message) => {
-    // Ignore bot messages (prevent loops)
     if (message.author.bot) return;
-    
-    // Ignore if already processed
     if (isRecentlyTranslated(message.id)) return;
     
-    // Check if channel is configured for translation
     const translationConfig = getTranslationConfig(message.channel.id);
     if (!translationConfig) return;
     
     const { targetChannel, sourceLang, targetLang } = translationConfig;
-    
-    // Get target channel
     const targetChannelObj = await client.channels.fetch(targetChannel).catch(() => null);
+    
     if (!targetChannelObj) {
         console.error(`❌ Target channel ${targetChannel} not found`);
         return;
     }
     
     try {
-        // Extract message content
         let textToTranslate = message.content.trim();
-        
         if (!textToTranslate && message.attachments.size === 0) return;
         
-        // Translate if there's text
         let translatedText = '';
         if (textToTranslate) {
+            console.log(`🔄 Translating: "${textToTranslate}" (${sourceLang} → ${targetLang})`);
             translatedText = await translate(textToTranslate, sourceLang, targetLang);
+            console.log(`✅ Translation result: "${translatedText}"`);
         }
         
-        // Create embed for translated message
         const embed = new EmbedBuilder()
             .setAuthor({
                 name: message.author.displayName || message.author.username,
@@ -214,34 +208,27 @@ client.on('messageCreate', async (message) => {
             embed.setDescription(translatedText);
         }
         
-        // Handle attachments
         const attachments = Array.from(message.attachments.values());
         if (attachments.length > 0) {
             const attachmentLinks = attachments.map(att => `[${att.name}](${att.url})`).join('\n');
             embed.addFields({ name: '📎 Attachments', value: attachmentLinks });
             
-            // Add first image as thumbnail if exists
             const firstImage = attachments.find(att => att.contentType?.startsWith('image/'));
             if (firstImage) {
                 embed.setImage(firstImage.url);
             }
         }
         
-        // Send translated message
         await targetChannelObj.send({ embeds: [embed] });
-        
-        // Mark as translated to prevent loops
         markAsTranslated(message.id);
         
-        console.log(`✅ Translated message from ${message.channel.name} to ${targetChannelObj.name}`);
+        console.log(`✅ Message translated from ${message.channel.name} to ${targetChannelObj.name}`);
         
     } catch (error) {
         console.error('❌ Translation error:', error.message);
-        
-        // Send error notification to source channel
         await message.reply({
             content: '⚠️ Translation failed. Please try again later.',
-            ephemeral: true
+            flags: [4096]
         }).catch(() => {});
     }
 });
@@ -291,11 +278,10 @@ client.on('interactionCreate', async (interaction) => {
     
     const { commandName } = interaction;
     
-    // Check admin permissions
     if (!isAdmin(interaction.member)) {
         return interaction.reply({
             content: '❌ You need Administrator permissions to use this command.',
-            ephemeral: true
+            flags: [4096]
         });
     }
     
@@ -306,7 +292,6 @@ client.on('interactionCreate', async (interaction) => {
             const sourceLang = interaction.options.getString('source_lang').toLowerCase();
             const targetLang = interaction.options.getString('target_lang').toLowerCase();
             
-            // Configure bidirectional translation
             config.channelMappings[sourceChannel.id] = {
                 targetChannel: targetChannel.id,
                 sourceLang: sourceLang,
@@ -322,9 +307,8 @@ client.on('interactionCreate', async (interaction) => {
             saveConfig();
             
             await interaction.reply({
-                content: `✅ Translation configured:\n` +
-                        `${sourceChannel} (${sourceLang.toUpperCase()}) ↔️ ${targetChannel} (${targetLang.toUpperCase()})`,
-                ephemeral: true
+                content: `✅ Translation configured:\n${sourceChannel} (${sourceLang.toUpperCase()}) ↔️ ${targetChannel} (${targetLang.toUpperCase()})`,
+                flags: [4096]
             });
             
         } else if (commandName === 'removelanguage') {
@@ -333,12 +317,11 @@ client.on('interactionCreate', async (interaction) => {
             if (!config.channelMappings[channel.id]) {
                 return interaction.reply({
                     content: '❌ This channel has no translation configured.',
-                    ephemeral: true
+                    flags: [4096]
                 });
             }
             
             const targetChannelId = config.channelMappings[channel.id].targetChannel;
-            
             delete config.channelMappings[channel.id];
             delete config.channelMappings[targetChannelId];
             
@@ -346,7 +329,7 @@ client.on('interactionCreate', async (interaction) => {
             
             await interaction.reply({
                 content: `✅ Translation removed from ${channel}`,
-                ephemeral: true
+                flags: [4096]
             });
             
         } else if (commandName === 'status') {
@@ -355,11 +338,10 @@ client.on('interactionCreate', async (interaction) => {
             if (mappings.length === 0) {
                 return interaction.reply({
                     content: '📊 No active translations configured.',
-                    ephemeral: true
+                    flags: [4096]
                 });
             }
             
-            // Get unique pairs (avoid duplicates from bidirectional config)
             const processed = new Set();
             const pairs = [];
             
@@ -388,7 +370,7 @@ client.on('interactionCreate', async (interaction) => {
                 });
             }
             
-            await interaction.reply({ embeds: [embed], ephemeral: true });
+            await interaction.reply({ embeds: [embed], flags: [4096] });
             
         } else if (commandName === 'ping') {
             const latency = Date.now() - interaction.createdTimestamp;
@@ -404,14 +386,14 @@ client.on('interactionCreate', async (interaction) => {
                 )
                 .setTimestamp();
             
-            await interaction.reply({ embeds: [embed], ephemeral: true });
+            await interaction.reply({ embeds: [embed], flags: [4096] });
         }
         
     } catch (error) {
         console.error('Command error:', error);
         await interaction.reply({
             content: '❌ An error occurred while executing the command.',
-            ephemeral: true
+            flags: [4096]
         }).catch(() => {});
     }
 });
@@ -422,24 +404,20 @@ client.once('clientReady', async () => {
     console.log(`✅ Bot logged in as ${client.user.tag}`);
     console.log(`📡 Serving ${client.guilds.cache.size} server(s)`);
     
-    // Register slash commands
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     
     try {
         console.log('🔄 Registering slash commands...');
-        
         await rest.put(
             Routes.applicationCommands(client.user.id),
             { body: commands }
         );
-        
         console.log('✅ Slash commands registered successfully');
     } catch (error) {
         console.error('❌ Error registering commands:', error);
     }
     
-    // Set bot status
-    client.user.setActivity('messages for translation', { type: 3 }); // 3 = WATCHING
+    client.user.setActivity('messages for translation', { type: 3 });
 });
 
 // ==================== ERROR HANDLING ====================
