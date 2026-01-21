@@ -19,7 +19,7 @@ function loadConfig() {
     
     return {
         channelMappings: {},
-        libreTranslateURL: 'https://libretranslate.com/translate',
+       libreTranslateURL: 'https://translate.argosopentech.com/translate',
         adminRoleId: null
     };
 }
