@@ -77,7 +77,7 @@ const server = http.createServer((req, res) => {
             </head>
             <body>
                 <h1>🌍 Translation Bot</h1>
-                <p>Real-time Discord translation service</p>
+                <p>Real-time Discord translation with auto-detection</p>
                 <div class="status">✅ Online & Running</div>
                 <p style="margin-top: 30px;">Bot: ${client.user ? client.user.tag : 'Connecting...'}</p>
                 <p>Uptime: ${Math.floor(process.uptime())}s</p>
@@ -110,7 +110,8 @@ async function translateWithMyMemory(text, sourceLang, targetLang) {
         const response = await axios.get('https://api.mymemory.translated.net/get', {
             params: {
                 q: text,
-                langpair: `${sourceLang}|${targetLang}`
+                langpair: `${sourceLang}|${targetLang}`,
+                de: 'discord-bot@translation.com' // Email for better quota
             },
             timeout: 10000,
             headers: {
@@ -127,6 +128,53 @@ async function translateWithMyMemory(text, sourceLang, targetLang) {
     } catch (error) {
         console.error('MyMemory translation error:', error.response?.data || error.message);
         throw error;
+    }
+}
+
+/**
+ * Detect language using heuristics (character script analysis)
+ */
+function detectLanguageHeuristic(text) {
+    // Remove emojis and special characters
+    const cleanText = text.replace(/[^\p{L}\s]/gu, '');
+    
+    // Count characters by script
+    const hindiChars = (cleanText.match(/[\u0900-\u097F]/g) || []).length;
+    const arabicChars = (cleanText.match(/[\u0600-\u06FF]/g) || []).length;
+    const chineseChars = (cleanText.match(/[\u4E00-\u9FFF]/g) || []).length;
+    const japaneseChars = (cleanText.match(/[\u3040-\u309F\u30A0-\u30FF]/g) || []).length;
+    const koreanChars = (cleanText.match(/[\uAC00-\uD7AF]/g) || []).length;
+    const cyrillicChars = (cleanText.match(/[\u0400-\u04FF]/g) || []).length;
+    const latinChars = (cleanText.match(/[a-zA-Z]/g) || []).length;
+    
+    const totalChars = cleanText.length;
+    
+    if (totalChars === 0) return 'en'; // Default if no valid characters
+    
+    // Determine language based on character distribution (30% threshold)
+    if (hindiChars > totalChars * 0.3) return 'hi';
+    if (arabicChars > totalChars * 0.3) return 'ar';
+    if (chineseChars > totalChars * 0.3) return 'zh';
+    if (japaneseChars > totalChars * 0.3) return 'ja';
+    if (koreanChars > totalChars * 0.3) return 'ko';
+    if (cyrillicChars > totalChars * 0.3) return 'ru';
+    
+    // Default to English for Latin script or mixed content
+    return 'en';
+}
+
+/**
+ * Detect language of text
+ */
+async function detectLanguage(text) {
+    try {
+        console.log(`🔍 Detecting language for: "${text.substring(0, 50)}..."`);
+        const detected = detectLanguageHeuristic(text);
+        console.log(`✅ Detected language: ${detected}`);
+        return detected;
+    } catch (error) {
+        console.error('Language detection error:', error.message);
+        return 'en'; // Default to English on error
     }
 }
 
@@ -190,8 +238,21 @@ client.on('messageCreate', async (message) => {
         
         let translatedText = '';
         if (textToTranslate) {
-            console.log(`🔄 Translating: "${textToTranslate}" (${sourceLang} → ${targetLang})`);
-            translatedText = await translate(textToTranslate, sourceLang, targetLang);
+            // Auto-detect source language if set to "auto"
+            let detectedLang = sourceLang;
+            if (sourceLang === 'auto') {
+                detectedLang = await detectLanguage(textToTranslate);
+                console.log(`🔍 Auto-detected language: ${detectedLang}`);
+            }
+            
+            // Skip translation if detected language matches target
+            if (detectedLang === targetLang) {
+                console.log(`⏭️ Skipping: message already in target language (${targetLang})`);
+                return;
+            }
+            
+            console.log(`🔄 Translating: "${textToTranslate}" (${detectedLang} → ${targetLang})`);
+            translatedText = await translate(textToTranslate, detectedLang, targetLang);
             console.log(`✅ Translation result: "${translatedText}"`);
         }
         
@@ -201,8 +262,15 @@ client.on('messageCreate', async (message) => {
                 iconURL: message.author.displayAvatarURL()
             })
             .setColor(0x5865F2)
-            .setTimestamp(message.createdAt)
-            .setFooter({ text: `Translated from ${sourceLang.toUpperCase()} → ${targetLang.toUpperCase()}` });
+            .setTimestamp(message.createdAt);
+        
+        // Show detected language in footer if auto-detect was used
+        if (sourceLang === 'auto') {
+            const detectedLang = await detectLanguage(textToTranslate);
+            embed.setFooter({ text: `Detected ${detectedLang.toUpperCase()} → Translated to ${targetLang.toUpperCase()}` });
+        } else {
+            embed.setFooter({ text: `Translated from ${sourceLang.toUpperCase()} → ${targetLang.toUpperCase()}` });
+        }
         
         if (translatedText) {
             embed.setDescription(translatedText);
@@ -249,11 +317,11 @@ const commands = [
                 .setRequired(true))
         .addStringOption(option =>
             option.setName('source_lang')
-                .setDescription('Source language code (e.g., en, hi, es)')
+                .setDescription('Source language (en, hi, es, fr, de, ar, zh, ja, ko) or "auto"')
                 .setRequired(true))
         .addStringOption(option =>
             option.setName('target_lang')
-                .setDescription('Target language code (e.g., en, hi, es)')
+                .setDescription('Target language (en, hi, es, fr, de, ar, zh, ja, ko)')
                 .setRequired(true)),
     
     new SlashCommandBuilder()
@@ -270,13 +338,33 @@ const commands = [
     
     new SlashCommandBuilder()
         .setName('ping')
-        .setDescription('Check bot latency and status')
+        .setDescription('Check bot latency and status'),
+    
+    new SlashCommandBuilder()
+        .setName('languages')
+        .setDescription('Show list of supported language codes')
 ];
 
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
     
     const { commandName } = interaction;
+    
+    if (commandName === 'languages') {
+        const embed = new EmbedBuilder()
+            .setTitle('🌍 Supported Language Codes')
+            .setColor(0x5865F2)
+            .setDescription('Use these codes with `/setlanguage` command:')
+            .addFields(
+                { name: 'Common Languages', value: '`en` English\n`hi` Hindi\n`es` Spanish\n`fr` French\n`de` German\n`ar` Arabic', inline: true },
+                { name: 'Asian Languages', value: '`zh` Chinese\n`ja` Japanese\n`ko` Korean\n`th` Thai\n`vi` Vietnamese\n`id` Indonesian', inline: true },
+                { name: 'European Languages', value: '`it` Italian\n`pt` Portuguese\n`ru` Russian\n`pl` Polish\n`nl` Dutch\n`tr` Turkish', inline: true },
+                { name: 'Auto-Detection', value: '`auto` - Automatically detect source language', inline: false }
+            )
+            .setFooter({ text: 'Example: /setlanguage source_lang:auto target_lang:en' });
+        
+        return interaction.reply({ embeds: [embed], flags: [4096] });
+    }
     
     if (!isAdmin(interaction.member)) {
         return interaction.reply({
@@ -289,8 +377,25 @@ client.on('interactionCreate', async (interaction) => {
         if (commandName === 'setlanguage') {
             const sourceChannel = interaction.options.getChannel('source_channel');
             const targetChannel = interaction.options.getChannel('target_channel');
-            const sourceLang = interaction.options.getString('source_lang').toLowerCase();
+            let sourceLang = interaction.options.getString('source_lang').toLowerCase();
             const targetLang = interaction.options.getString('target_lang').toLowerCase();
+            
+            // Validate languages
+            const validLangs = ['en', 'hi', 'es', 'fr', 'de', 'ar', 'zh', 'ja', 'ko', 'pt', 'ru', 'it', 'tr', 'pl', 'nl', 'auto'];
+            
+            if (!validLangs.includes(sourceLang)) {
+                return interaction.reply({
+                    content: `❌ Invalid source language: ${sourceLang}\nSupported: ${validLangs.join(', ')}\nUse \`/languages\` to see all options.`,
+                    flags: [4096]
+                });
+            }
+            
+            if (!validLangs.includes(targetLang) || targetLang === 'auto') {
+                return interaction.reply({
+                    content: `❌ Invalid target language: ${targetLang}\nTarget cannot be "auto". Use a specific language code.`,
+                    flags: [4096]
+                });
+            }
             
             config.channelMappings[sourceChannel.id] = {
                 targetChannel: targetChannel.id,
@@ -306,8 +411,10 @@ client.on('interactionCreate', async (interaction) => {
             
             saveConfig();
             
+            const langDisplay = sourceLang === 'auto' ? 'AUTO-DETECT' : sourceLang.toUpperCase();
+            
             await interaction.reply({
-                content: `✅ Translation configured:\n${sourceChannel} (${sourceLang.toUpperCase()}) ↔️ ${targetChannel} (${targetLang.toUpperCase()})`,
+                content: `✅ Translation configured:\n${sourceChannel} (${langDisplay}) ↔️ ${targetChannel} (${targetLang.toUpperCase()})`,
                 flags: [4096]
             });
             
@@ -352,7 +459,7 @@ client.on('interactionCreate', async (interaction) => {
                     pairs.push({
                         channel1: channelId,
                         channel2: cfg.targetChannel,
-                        lang1: cfg.sourceLang,
+                        lang1: cfg.sourceLang === 'auto' ? 'AUTO' : cfg.sourceLang,
                         lang2: cfg.targetLang
                     });
                 }
@@ -417,7 +524,7 @@ client.once('clientReady', async () => {
         console.error('❌ Error registering commands:', error);
     }
     
-    client.user.setActivity('messages for translation', { type: 3 });
+    client.user.setActivity('🌍 Auto-translating messages', { type: 3 });
 });
 
 // ==================== ERROR HANDLING ====================
