@@ -1,3 +1,4 @@
+const http = require('http');
 const { Client, GatewayIntentBits, EmbedBuilder, PermissionFlagsBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
@@ -16,7 +17,6 @@ function loadConfig() {
         console.error('Error loading config:', error.message);
     }
     
-    // Default configuration
     return {
         channelMappings: {},
         translationEngine: 'libretranslate',
@@ -34,6 +34,112 @@ function saveConfig() {
     }
 }
 
+// ==================== WEB SERVER (RENDER REQUIREMENT) ====================
+const PORT = process.env.PORT || 3000;
+
+const server = http.createServer((req, res) => {
+    if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'healthy',
+            uptime: Math.floor(process.uptime()),
+            bot: client.user ? client.user.tag : 'Connecting...',
+            guilds: client.guilds ? client.guilds.cache.size : 0,
+            timestamp: new Date().toISOString()
+        }));
+    } else {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Discord Translation Bot</title>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    * { margin: 0; padding: 0; box-sizing: border-box; }
+                    body { 
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        color: white;
+                        min-height: 100vh;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        padding: 20px;
+                    }
+                    .container {
+                        text-align: center;
+                        max-width: 600px;
+                    }
+                    h1 { 
+                        font-size: 3em; 
+                        margin-bottom: 20px;
+                        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+                    }
+                    .emoji { font-size: 1.2em; }
+                    p { 
+                        font-size: 1.2em; 
+                        margin: 10px 0;
+                        opacity: 0.9;
+                    }
+                    .status { 
+                        background: #57F287; 
+                        color: #1e1e1e;
+                        padding: 15px 30px; 
+                        border-radius: 10px; 
+                        display: inline-block; 
+                        margin-top: 30px;
+                        font-weight: bold;
+                        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+                    }
+                    .info {
+                        background: rgba(255,255,255,0.1);
+                        border-radius: 10px;
+                        padding: 20px;
+                        margin-top: 30px;
+                        backdrop-filter: blur(10px);
+                    }
+                    .info p {
+                        font-size: 1em;
+                        margin: 8px 0;
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1><span class="emoji">🌍</span> Translation Bot</h1>
+                    <p>Real-time bidirectional Discord translation</p>
+                    <div class="status">✅ Online & Running</div>
+                    <div class="info">
+                        <p><strong>Bot:</strong> ${client.user ? client.user.tag : 'Connecting...'}</p>
+                        <p><strong>Servers:</strong> ${client.guilds ? client.guilds.cache.size : 0}</p>
+                        <p><strong>Uptime:</strong> ${formatUptime(process.uptime())}</p>
+                        <p><strong>Status:</strong> Healthy</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+        `);
+    }
+});
+
+function formatUptime(seconds) {
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    
+    if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    if (minutes > 0) return `${minutes}m ${secs}s`;
+    return `${secs}s`;
+}
+
+server.listen(PORT, () => {
+    console.log(`🌐 Web server running on port ${PORT}`);
+});
+
 // ==================== DISCORD CLIENT SETUP ====================
 const client = new Client({
     intents: [
@@ -45,9 +151,6 @@ const client = new Client({
 
 // ==================== TRANSLATION FUNCTIONS ====================
 
-/**
- * Translate text using LibreTranslate
- */
 async function translateWithLibre(text, sourceLang, targetLang) {
     try {
         const response = await axios.post(config.libreTranslateURL, {
@@ -67,10 +170,6 @@ async function translateWithLibre(text, sourceLang, targetLang) {
     }
 }
 
-/**
- * Translate text using Google Translate (fallback)
- * Requires GOOGLE_TRANSLATE_API_KEY in .env
- */
 async function translateWithGoogle(text, sourceLang, targetLang) {
     const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY;
     
@@ -100,12 +199,8 @@ async function translateWithGoogle(text, sourceLang, targetLang) {
     }
 }
 
-/**
- * Main translation function with retry and fallback
- */
 async function translate(text, sourceLang, targetLang, retryCount = 0) {
     try {
-        // Try LibreTranslate first
         return await translateWithLibre(text, sourceLang, targetLang);
     } catch (error) {
         if (retryCount < 1) {
@@ -114,7 +209,6 @@ async function translate(text, sourceLang, targetLang, retryCount = 0) {
             return translate(text, sourceLang, targetLang, retryCount + 1);
         }
         
-        // Fallback to Google Translate
         try {
             console.log('🔄 Falling back to Google Translate...');
             return await translateWithGoogle(text, sourceLang, targetLang);
@@ -126,16 +220,10 @@ async function translate(text, sourceLang, targetLang, retryCount = 0) {
 
 // ==================== HELPER FUNCTIONS ====================
 
-/**
- * Check if a channel has translation configured
- */
 function getTranslationConfig(channelId) {
     return config.channelMappings[channelId] || null;
 }
 
-/**
- * Prevent infinite loops by tracking recently translated messages
- */
 const recentTranslations = new Set();
 
 function isRecentlyTranslated(messageId) {
@@ -144,13 +232,9 @@ function isRecentlyTranslated(messageId) {
 
 function markAsTranslated(messageId) {
     recentTranslations.add(messageId);
-    // Clean up after 30 seconds
     setTimeout(() => recentTranslations.delete(messageId), 30000);
 }
 
-/**
- * Check if user has admin permissions
- */
 function isAdmin(member) {
     return member.permissions.has(PermissionFlagsBits.Administrator);
 }
@@ -158,38 +242,29 @@ function isAdmin(member) {
 // ==================== MESSAGE HANDLER ====================
 
 client.on('messageCreate', async (message) => {
-    // Ignore bot messages (prevent loops)
     if (message.author.bot) return;
-    
-    // Ignore if already processed
     if (isRecentlyTranslated(message.id)) return;
     
-    // Check if channel is configured for translation
     const translationConfig = getTranslationConfig(message.channel.id);
     if (!translationConfig) return;
     
     const { targetChannel, sourceLang, targetLang } = translationConfig;
-    
-    // Get target channel
     const targetChannelObj = await client.channels.fetch(targetChannel).catch(() => null);
+    
     if (!targetChannelObj) {
         console.error(`❌ Target channel ${targetChannel} not found`);
         return;
     }
     
     try {
-        // Extract message content
         let textToTranslate = message.content.trim();
-        
         if (!textToTranslate && message.attachments.size === 0) return;
         
-        // Translate if there's text
         let translatedText = '';
         if (textToTranslate) {
             translatedText = await translate(textToTranslate, sourceLang, targetLang);
         }
         
-        // Create embed for translated message
         const embed = new EmbedBuilder()
             .setAuthor({
                 name: message.author.displayName || message.author.username,
@@ -203,31 +278,24 @@ client.on('messageCreate', async (message) => {
             embed.setDescription(translatedText);
         }
         
-        // Handle attachments
         const attachments = Array.from(message.attachments.values());
         if (attachments.length > 0) {
             const attachmentLinks = attachments.map(att => `[${att.name}](${att.url})`).join('\n');
             embed.addFields({ name: '📎 Attachments', value: attachmentLinks });
             
-            // Add first image as thumbnail if exists
             const firstImage = attachments.find(att => att.contentType?.startsWith('image/'));
             if (firstImage) {
                 embed.setImage(firstImage.url);
             }
         }
         
-        // Send translated message
         await targetChannelObj.send({ embeds: [embed] });
-        
-        // Mark as translated to prevent loops
         markAsTranslated(message.id);
         
-        console.log(`✅ Translated message from ${message.channel.name} to ${targetChannelObj.name}`);
+        console.log(`✅ Translated: ${message.channel.name} → ${targetChannelObj.name}`);
         
     } catch (error) {
         console.error('❌ Translation error:', error.message);
-        
-        // Send error notification to source channel
         await message.reply({
             content: '⚠️ Translation failed. Please try again later.',
             ephemeral: true
@@ -280,7 +348,6 @@ client.on('interactionCreate', async (interaction) => {
     
     const { commandName } = interaction;
     
-    // Check admin permissions
     if (!isAdmin(interaction.member)) {
         return interaction.reply({
             content: '❌ You need Administrator permissions to use this command.',
@@ -295,7 +362,6 @@ client.on('interactionCreate', async (interaction) => {
             const sourceLang = interaction.options.getString('source_lang').toLowerCase();
             const targetLang = interaction.options.getString('target_lang').toLowerCase();
             
-            // Configure bidirectional translation
             config.channelMappings[sourceChannel.id] = {
                 targetChannel: targetChannel.id,
                 sourceLang: sourceLang,
@@ -311,8 +377,7 @@ client.on('interactionCreate', async (interaction) => {
             saveConfig();
             
             await interaction.reply({
-                content: `✅ Translation configured:\n` +
-                        `${sourceChannel} (${sourceLang.toUpperCase()}) ↔️ ${targetChannel} (${targetLang.toUpperCase()})`,
+                content: `✅ Translation configured:\n${sourceChannel} (${sourceLang.toUpperCase()}) ↔️ ${targetChannel} (${targetLang.toUpperCase()})`,
                 ephemeral: true
             });
             
@@ -327,7 +392,6 @@ client.on('interactionCreate', async (interaction) => {
             }
             
             const targetChannelId = config.channelMappings[channel.id].targetChannel;
-            
             delete config.channelMappings[channel.id];
             delete config.channelMappings[targetChannelId];
             
@@ -348,7 +412,6 @@ client.on('interactionCreate', async (interaction) => {
                 });
             }
             
-            // Get unique pairs (avoid duplicates from bidirectional config)
             const processed = new Set();
             const pairs = [];
             
@@ -411,24 +474,20 @@ client.once('ready', async () => {
     console.log(`✅ Bot logged in as ${client.user.tag}`);
     console.log(`📡 Serving ${client.guilds.cache.size} server(s)`);
     
-    // Register slash commands
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     
     try {
         console.log('🔄 Registering slash commands...');
-        
         await rest.put(
             Routes.applicationCommands(client.user.id),
             { body: commands }
         );
-        
         console.log('✅ Slash commands registered successfully');
     } catch (error) {
         console.error('❌ Error registering commands:', error);
     }
     
-    // Set bot status
-    client.user.setActivity('messages for translation', { type: 3 }); // 3 = WATCHING
+    client.user.setActivity('messages for translation', { type: 3 });
 });
 
 // ==================== ERROR HANDLING ====================
@@ -443,7 +502,15 @@ process.on('unhandledRejection', error => {
 
 // ==================== START BOT ====================
 
-client.login(process.env.DISCORD_TOKEN).catch(error => {
+const token = process.env.DISCORD_TOKEN;
+
+if (!token) {
+    console.error('❌ ERROR: DISCORD_TOKEN environment variable is not set!');
+    console.error('Please add DISCORD_TOKEN in your Render environment variables.');
+    process.exit(1);
+}
+
+client.login(token).catch(error => {
     console.error('❌ Failed to login:', error.message);
     process.exit(1);
 });

@@ -1,3 +1,4 @@
+const http = require('http');
 const { Client, GatewayIntentBits, EmbedBuilder, PermissionFlagsBits, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
@@ -16,10 +17,8 @@ function loadConfig() {
         console.error('Error loading config:', error.message);
     }
     
-    // Default configuration
     return {
         channelMappings: {},
-        translationEngine: 'libretranslate',
         libreTranslateURL: 'https://libretranslate.com/translate',
         adminRoleId: null
     };
@@ -33,6 +32,64 @@ function saveConfig() {
         console.error('❌ Error saving config:', error.message);
     }
 }
+
+// ==================== WEB SERVER (RENDER REQUIREMENT) ====================
+const PORT = process.env.PORT || 3000;
+
+const server = http.createServer((req, res) => {
+    if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'healthy',
+            uptime: Math.floor(process.uptime()),
+            bot: client.user ? client.user.tag : 'Connecting...',
+            guilds: client.guilds ? client.guilds.cache.size : 0,
+            timestamp: new Date().toISOString()
+        }));
+    } else {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Discord Translation Bot</title>
+                <style>
+                    body { 
+                        font-family: Arial; 
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        color: white;
+                        text-align: center;
+                        padding: 50px;
+                        min-height: 100vh;
+                        margin: 0;
+                    }
+                    h1 { font-size: 3em; margin-bottom: 20px; }
+                    .status { 
+                        background: #57F287; 
+                        color: #1e1e1e;
+                        padding: 15px 30px; 
+                        border-radius: 10px; 
+                        display: inline-block; 
+                        margin-top: 20px;
+                        font-weight: bold;
+                    }
+                </style>
+            </head>
+            <body>
+                <h1>🌍 Translation Bot</h1>
+                <p>Real-time Discord translation service</p>
+                <div class="status">✅ Online & Running</div>
+                <p style="margin-top: 30px;">Bot: ${client.user ? client.user.tag : 'Connecting...'}</p>
+                <p>Uptime: ${Math.floor(process.uptime())}s</p>
+            </body>
+            </html>
+        `);
+    }
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🌐 Web server running on port ${PORT}`);
+});
 
 // ==================== DISCORD CLIENT SETUP ====================
 const client = new Client({
@@ -68,44 +125,10 @@ async function translateWithLibre(text, sourceLang, targetLang) {
 }
 
 /**
- * Translate text using Google Translate (fallback)
- * Requires GOOGLE_TRANSLATE_API_KEY in .env
- */
-async function translateWithGoogle(text, sourceLang, targetLang) {
-    const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY;
-    
-    if (!apiKey) {
-        throw new Error('Google Translate API key not configured');
-    }
-    
-    try {
-        const response = await axios.post(
-            `https://translation.googleapis.com/language/translate/v2`,
-            {
-                q: text,
-                source: sourceLang,
-                target: targetLang,
-                format: 'text'
-            },
-            {
-                params: { key: apiKey },
-                timeout: 10000
-            }
-        );
-        
-        return response.data.data.translations[0].translatedText;
-    } catch (error) {
-        console.error('Google Translate error:', error.message);
-        throw error;
-    }
-}
-
-/**
- * Main translation function with retry and fallback
+ * Main translation function with retry
  */
 async function translate(text, sourceLang, targetLang, retryCount = 0) {
     try {
-        // Try LibreTranslate first
         return await translateWithLibre(text, sourceLang, targetLang);
     } catch (error) {
         if (retryCount < 1) {
@@ -113,29 +136,16 @@ async function translate(text, sourceLang, targetLang, retryCount = 0) {
             await new Promise(resolve => setTimeout(resolve, 1000));
             return translate(text, sourceLang, targetLang, retryCount + 1);
         }
-        
-        // Fallback to Google Translate
-        try {
-            console.log('🔄 Falling back to Google Translate...');
-            return await translateWithGoogle(text, sourceLang, targetLang);
-        } catch (googleError) {
-            throw new Error('All translation services failed');
-        }
+        throw new Error('Translation service failed');
     }
 }
 
 // ==================== HELPER FUNCTIONS ====================
 
-/**
- * Check if a channel has translation configured
- */
 function getTranslationConfig(channelId) {
     return config.channelMappings[channelId] || null;
 }
 
-/**
- * Prevent infinite loops by tracking recently translated messages
- */
 const recentTranslations = new Set();
 
 function isRecentlyTranslated(messageId) {
@@ -144,13 +154,9 @@ function isRecentlyTranslated(messageId) {
 
 function markAsTranslated(messageId) {
     recentTranslations.add(messageId);
-    // Clean up after 30 seconds
     setTimeout(() => recentTranslations.delete(messageId), 30000);
 }
 
-/**
- * Check if user has admin permissions
- */
 function isAdmin(member) {
     return member.permissions.has(PermissionFlagsBits.Administrator);
 }
@@ -407,7 +413,7 @@ client.on('interactionCreate', async (interaction) => {
 
 // ==================== BOT READY EVENT ====================
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
     console.log(`✅ Bot logged in as ${client.user.tag}`);
     console.log(`📡 Serving ${client.guilds.cache.size} server(s)`);
     
@@ -443,7 +449,15 @@ process.on('unhandledRejection', error => {
 
 // ==================== START BOT ====================
 
-client.login(process.env.DISCORD_TOKEN).catch(error => {
+const token = process.env.DISCORD_TOKEN;
+
+if (!token) {
+    console.error('❌ ERROR: DISCORD_TOKEN environment variable is not set!');
+    console.error('Please add DISCORD_TOKEN in your environment variables.');
+    process.exit(1);
+}
+
+client.login(token).catch(error => {
     console.error('❌ Failed to login:', error.message);
     process.exit(1);
 });
