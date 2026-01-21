@@ -1,0 +1,25 @@
+{
+  "name": "discord-translation-bot",
+  "version": "1.0.0",
+  "description": "Discord Translation Bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "build": "npm install"
+  },
+  "keywords": [
+    "discord",
+    "translation",
+    "bot"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.13.2",
+    "discord.js": "^14.25.1",
+    "dotenv": "16.3.1"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}

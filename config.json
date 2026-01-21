@@ -1,0 +1,17 @@
+{
+  "channelMappings": {
+    "123456789012345678": {
+      "targetChannel": "987654321098765432",
+      "sourceLang": "en",
+      "targetLang": "hi"
+    },
+    "987654321098765432": {
+      "targetChannel": "123456789012345678",
+      "sourceLang": "hi",
+      "targetLang": "en"
+    }
+  },
+  "translationEngine": "libretranslate",
+  "libreTranslateURL": "https://libretranslate.com/translate",
+  "adminRoleId": null
+}
