@@ -120,51 +120,35 @@ const commands = [
     new SlashCommandBuilder()
         .setName('setlang')
         .setDescription('Assign a language to a channel')
-        .addChannelOption(o => o.setName('channel').setRequired(true))
-        .addStringOption(o => o.setName('language').setRequired(true)),
+        .addChannelOption(o =>
+            o.setName('channel')
+             .setDescription('Channel to assign a language to')
+             .setRequired(true)
+        )
+        .addStringOption(o =>
+            o.setName('language')
+             .setDescription('Language code (en, hi, fr, etc.)')
+             .setRequired(true)
+        ),
 
     new SlashCommandBuilder()
         .setName('removelang')
         .setDescription('Remove channel from translation')
-        .addChannelOption(o => o.setName('channel').setRequired(true)),
+        .addChannelOption(o =>
+            o.setName('channel')
+             .setDescription('Channel to remove from translation')
+             .setRequired(true)
+        ),
 
     new SlashCommandBuilder()
         .setName('listlangs')
-        .setDescription('List language mappings'),
+        .setDescription('List all channel language mappings'),
 
     new SlashCommandBuilder()
         .setName('ping')
-        .setDescription('Bot latency')
+        .setDescription('Check bot latency')
 ];
 
-client.on('interactionCreate', async (i) => {
-    if (!i.isChatInputCommand()) return;
-    if (!isAdmin(i.member)) return i.reply({ content: 'Admin only', ephemeral: true });
-
-    if (i.commandName === 'setlang') {
-        config.channelLanguages[i.options.getChannel('channel').id] =
-            i.options.getString('language').toLowerCase();
-        saveConfig();
-        return i.reply({ content: '✅ Language set', ephemeral: true });
-    }
-
-    if (i.commandName === 'removelang') {
-        delete config.channelLanguages[i.options.getChannel('channel').id];
-        saveConfig();
-        return i.reply({ content: '🗑️ Removed', ephemeral: true });
-    }
-
-    if (i.commandName === 'listlangs') {
-        const list = Object.entries(config.channelLanguages)
-            .map(([id, l]) => `<#${id}> → ${l}`)
-            .join('\n') || 'None';
-        return i.reply({ content: list, ephemeral: true });
-    }
-
-    if (i.commandName === 'ping') {
-        return i.reply({ content: `🏓 ${client.ws.ping}ms`, ephemeral: true });
-    }
-});
 
 // ==================== READY ====================
 
