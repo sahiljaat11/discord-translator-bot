@@ -44,16 +44,18 @@ const PORT = process.env.PORT || 3000;
 const server = http.createServer((req, res) => {
     if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
+        const pairCount = config.translationPairs ? config.translationPairs.length : 0;
         res.end(JSON.stringify({
             status: 'healthy',
             uptime: Math.floor(process.uptime()),
             bot: client.user ? client.user.tag : 'Connecting...',
             guilds: client.guilds ? client.guilds.cache.size : 0,
-            activePairs: config.translationPairs.length,
+            activePairs: pairCount,
             timestamp: new Date().toISOString()
         }));
     } else {
         res.writeHead(200, { 'Content-Type': 'text/html' });
+        const pairCount = config.translationPairs ? config.translationPairs.length : 0;
         res.end(`
             <!DOCTYPE html>
             <html>
@@ -99,7 +101,7 @@ const server = http.createServer((req, res) => {
                     <div class="info">
                         <p><strong>Bot:</strong> ${client.user ? client.user.tag : 'Connecting...'}</p>
                         <p><strong>Servers:</strong> ${client.guilds ? client.guilds.cache.size : 0}</p>
-                        <p><strong>Active Pairs:</strong> ${config.translationPairs.length}</p>
+                        <p><strong>Active Pairs:</strong> ${pairCount}</p>
                         <p><strong>Uptime:</strong> ${Math.floor(process.uptime())}s</p>
                     </div>
                 </div>
@@ -283,6 +285,9 @@ function isAdmin(member) {
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     if (isRecentlyTranslated(message.id)) return;
+    
+    // Ensure translationPairs exists
+    if (!config.translationPairs || config.translationPairs.length === 0) return;
     
     // Find all translation pairs where this channel is the source
     const pairs = config.translationPairs.filter(p => p.sourceChannel === message.channel.id);
@@ -482,6 +487,9 @@ client.on('interactionCreate', async (interaction) => {
     
     try {
         if (commandName === 'add') {
+            // Defer reply for slow operations
+            await interaction.deferReply({ flags: [4096] });
+            
             const source = interaction.options.getChannel('source');
             const target = interaction.options.getChannel('target');
             const sourceLang = interaction.options.getString('source_lang').toLowerCase();
@@ -492,25 +500,27 @@ client.on('interactionCreate', async (interaction) => {
             const validLangs = ['en', 'hi', 'es', 'fr', 'de', 'ar', 'zh', 'ja', 'ko', 'pt', 'ru', 'it', 'tr', 'pl', 'nl', 'th', 'vi', 'id', 'auto'];
             
             if (!validLangs.includes(sourceLang)) {
-                return interaction.reply({
-                    content: `❌ Invalid source language: \`${sourceLang}\`\nUse \`/languages\` to see supported codes.`,
-                    flags: [4096]
+                return interaction.editReply({
+                    content: `❌ Invalid source language: \`${sourceLang}\`\nUse \`/languages\` to see supported codes.`
                 });
             }
             
             if (!validLangs.includes(targetLang) || targetLang === 'auto') {
-                return interaction.reply({
-                    content: `❌ Invalid target language: \`${targetLang}\`\nTarget cannot be "auto".`,
-                    flags: [4096]
+                return interaction.editReply({
+                    content: `❌ Invalid target language: \`${targetLang}\`\nTarget cannot be "auto".`
                 });
             }
             
             // Check if pair already exists
             if (pairExists(source.id, target.id)) {
-                return interaction.reply({
-                    content: `⚠️ A translation pair already exists between ${source} and ${target}.\nUse \`/remove\` to delete it first.`,
-                    flags: [4096]
+                return interaction.editReply({
+                    content: `⚠️ A translation pair already exists between ${source} and ${target}.\nUse \`/remove\` to delete it first.`
                 });
+            }
+            
+            // Ensure translationPairs array exists
+            if (!config.translationPairs) {
+                config.translationPairs = [];
             }
             
             // Create pair ID
@@ -544,36 +554,45 @@ client.on('interactionCreate', async (interaction) => {
             const direction = bidirectional ? '↔️' : '→';
             const sourceLangDisplay = sourceLang === 'auto' ? 'AUTO' : sourceLang.toUpperCase();
             
-            await interaction.reply({
-                content: `✅ **Translation pair added!**\n${source} (${sourceLangDisplay}) ${direction} ${target} (${targetLang.toUpperCase()})\n\n*Pair ID: \`${pairId}\`*`,
-                flags: [4096]
+            await interaction.editReply({
+                content: `✅ **Translation pair added!**\n${source} (${sourceLangDisplay}) ${direction} ${target} (${targetLang.toUpperCase()})\n\n*Pair ID: \`${pairId}\`*`
             });
             
         } else if (commandName === 'remove') {
+            await interaction.deferReply({ flags: [4096] });
+            
             const pairId = interaction.options.getString('pair_id');
+            
+            if (!config.translationPairs) {
+                config.translationPairs = [];
+            }
             
             const initialLength = config.translationPairs.length;
             config.translationPairs = config.translationPairs.filter(p => !p.id.startsWith(pairId) && !p.id.endsWith(pairId));
             
             if (config.translationPairs.length === initialLength) {
-                return interaction.reply({
-                    content: `❌ Pair ID \`${pairId}\` not found.\nUse \`/list\` to see all pairs.`,
-                    flags: [4096]
+                return interaction.editReply({
+                    content: `❌ Pair ID \`${pairId}\` not found.\nUse \`/list\` to see all pairs.`
                 });
             }
             
             saveConfig();
             
-            await interaction.reply({
-                content: `✅ Translation pair \`${pairId}\` removed!`,
-                flags: [4096]
+            await interaction.editReply({
+                content: `✅ Translation pair \`${pairId}\` removed!`
             });
             
         } else if (commandName === 'list') {
+            await interaction.deferReply({ flags: [4096] });
+            
+            // Ensure translationPairs exists
+            if (!config.translationPairs) {
+                config.translationPairs = [];
+            }
+            
             if (config.translationPairs.length === 0) {
-                return interaction.reply({
-                    content: '📊 No active translation pairs.\nUse `/add` to create one!',
-                    flags: [4096]
+                return interaction.editReply({
+                    content: '📊 No active translation pairs.\nUse `/add` to create one!'
                 });
             }
             
@@ -608,24 +627,29 @@ client.on('interactionCreate', async (interaction) => {
                 });
             }
             
-            await interaction.reply({ embeds: [embed], flags: [4096] });
+            await interaction.editReply({ embeds: [embed] });
             
         } else if (commandName === 'clear') {
+            await interaction.deferReply({ flags: [4096] });
+            
+            // Ensure translationPairs exists
+            if (!config.translationPairs) {
+                config.translationPairs = [];
+            }
+            
             const count = config.translationPairs.length;
             
             if (count === 0) {
-                return interaction.reply({
-                    content: '📊 No translation pairs to clear.',
-                    flags: [4096]
+                return interaction.editReply({
+                    content: '📊 No translation pairs to clear.'
                 });
             }
             
             config.translationPairs = [];
             saveConfig();
             
-            await interaction.reply({
-                content: `✅ Cleared **${count}** translation pair(s)!`,
-                flags: [4096]
+            await interaction.editReply({
+                content: `✅ Cleared **${count}** translation pair(s)!`
             });
         }
         
@@ -643,6 +667,12 @@ client.on('interactionCreate', async (interaction) => {
 client.once('clientReady', async () => {
     console.log(`✅ Bot logged in as ${client.user.tag}`);
     console.log(`📡 Serving ${client.guilds.cache.size} server(s)`);
+    
+    // Ensure translationPairs exists
+    if (!config.translationPairs) {
+        config.translationPairs = [];
+    }
+    
     console.log(`🔄 Active translation pairs: ${config.translationPairs.length}`);
     
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -658,7 +688,8 @@ client.once('clientReady', async () => {
         console.error('❌ Error registering commands:', error);
     }
     
-    client.user.setActivity(`${config.translationPairs.length} translation pairs`, { type: 3 });
+    const pairCount = config.translationPairs ? config.translationPairs.length : 0;
+    client.user.setActivity(`${pairCount} translation pairs`, { type: 3 });
 });
 
 // ==================== ERROR HANDLING ====================
