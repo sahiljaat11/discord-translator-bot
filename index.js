@@ -8,6 +8,11 @@ require('dotenv').config();
 const CONFIG_FILE = './config.json';
 let config = loadConfig();
 
+// WHITELIST: Add your server IDs here (right-click server → Copy ID)
+const ALLOWED_SERVERS = process.env.ALLOWED_SERVERS 
+    ? process.env.ALLOWED_SERVERS.split(',') 
+    : []; // Empty = allow all servers
+
 function loadConfig() {
     try {
         if (fs.existsSync(CONFIG_FILE)) {
@@ -286,6 +291,12 @@ client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     if (isRecentlyTranslated(message.id)) return;
     
+    // Server whitelist check
+    if (ALLOWED_SERVERS.length > 0 && !ALLOWED_SERVERS.includes(message.guild.id)) {
+        console.log(`⚠️ Ignoring message from unauthorized server: ${message.guild.name}`);
+        return;
+    }
+    
     // Ensure translationPairs exists
     if (!config.translationPairs || config.translationPairs.length === 0) return;
     
@@ -426,6 +437,14 @@ client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
     
     const { commandName } = interaction;
+    
+    // Server whitelist check
+    if (ALLOWED_SERVERS.length > 0 && !ALLOWED_SERVERS.includes(interaction.guild.id)) {
+        return interaction.reply({
+            content: '🔒 This bot is private and only works in authorized servers.',
+            flags: [4096]
+        });
+    }
     
     // Public commands
     if (commandName === 'languages') {
@@ -668,6 +687,13 @@ client.once('clientReady', async () => {
     console.log(`✅ Bot logged in as ${client.user.tag}`);
     console.log(`📡 Serving ${client.guilds.cache.size} server(s)`);
     
+    // Show whitelist status
+    if (ALLOWED_SERVERS.length > 0) {
+        console.log(`🔒 Server whitelist active: ${ALLOWED_SERVERS.length} allowed server(s)`);
+    } else {
+        console.log(`🌐 Public mode: Bot works in all servers`);
+    }
+    
     // Ensure translationPairs exists
     if (!config.translationPairs) {
         config.translationPairs = [];
@@ -689,7 +715,8 @@ client.once('clientReady', async () => {
     }
     
     const pairCount = config.translationPairs ? config.translationPairs.length : 0;
-    client.user.setActivity(`${pairCount} translation pairs`, { type: 3 });
+    const mode = ALLOWED_SERVERS.length > 0 ? '🔒 Private' : '🌐 Public';
+    client.user.setActivity(`${mode} | ${pairCount} pairs`, { type: 3 });
 });
 
 // ==================== ERROR HANDLING ====================

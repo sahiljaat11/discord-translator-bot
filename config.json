@@ -11,6 +11,7 @@
       "targetLang": "en"
     }
   },
+  
   "translationEngine": "libretranslate",
   "libreTranslateURL": "https://libretranslate.com/translate",
   "adminRoleId": null
