@@ -5,7 +5,9 @@ const fs = require('fs');
 require('dotenv').config();
 
 // ==================== CONFIGURATION ====================
-const CONFIG_FILE = './config.json';
+// Use persistent disk path on Render
+const CONFIG_DIR = process.env.RENDER ? '/var/data' : '.';
+const CONFIG_FILE = `${CONFIG_DIR}/config.json`;
 let config = loadConfig();
 
 // WHITELIST: Add your server IDs here (right-click server → Copy ID)
@@ -15,17 +17,26 @@ const ALLOWED_SERVERS = process.env.ALLOWED_SERVERS
 
 function loadConfig() {
     try {
+        // Ensure directory exists on Render
+        if (process.env.RENDER && !fs.existsSync(CONFIG_DIR)) {
+            fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        }
+        
         if (fs.existsSync(CONFIG_FILE)) {
-            return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+            const data = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+            console.log(`📂 Loaded config with ${data.translationPairs?.length || 0} translation pairs`);
+            return data;
         }
     } catch (error) {
         console.error('Error loading config:', error.message);
     }
     
+    console.log('📂 Creating new config file');
+    
     // New structure: array of translation pairs
     return {
         translationPairs: [],
-        translationServices: ['libretranslate', 'mymemory'],
+        translationServices: ['azure', 'deepl', 'libretranslate', 'mymemory'],
         libreInstances: [
             'https://translate.argosopentech.com/translate',
             'https://libretranslate.com/translate',
@@ -36,8 +47,13 @@ function loadConfig() {
 
 function saveConfig() {
     try {
+        // Ensure directory exists
+        if (process.env.RENDER && !fs.existsSync(CONFIG_DIR)) {
+            fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        }
+        
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
-        console.log('✅ Configuration saved');
+        console.log(`✅ Configuration saved (${config.translationPairs?.length || 0} pairs)`);
     } catch (error) {
         console.error('❌ Error saving config:', error.message);
     }
@@ -132,7 +148,109 @@ const client = new Client({
 // ==================== TRANSLATION FUNCTIONS ====================
 
 /**
- * Try LibreTranslate instances (faster, better quality)
+ * Translate using DeepL (Excellent quality)
+ */
+async function translateWithDeepL(text, sourceLang, targetLang) {
+    const apiKey = process.env.DEEPL_API_KEY;
+    
+    if (!apiKey) {
+        throw new Error('DeepL API key not configured');
+    }
+    
+    try {
+        // DeepL uses different language codes for some languages
+        const deeplLangMap = {
+            'en': 'EN',
+            'de': 'DE',
+            'fr': 'FR',
+            'es': 'ES',
+            'pt': 'PT',
+            'it': 'IT',
+            'nl': 'NL',
+            'pl': 'PL',
+            'ru': 'RU',
+            'ja': 'JA',
+            'zh': 'ZH',
+            'auto': 'auto'
+        };
+        
+        const fromLang = deeplLangMap[sourceLang] || sourceLang.toUpperCase();
+        const toLang = deeplLangMap[targetLang] || targetLang.toUpperCase();
+        
+        // Check if DeepL supports these languages
+        const supportedLangs = ['EN', 'DE', 'FR', 'ES', 'PT', 'IT', 'NL', 'PL', 'RU', 'JA', 'ZH', 'KO', 'SV', 'DA', 'FI', 'NO', 'CS', 'BG', 'RO', 'EL', 'TR', 'HU', 'SK', 'SL', 'ET', 'LV', 'LT'];
+        
+        if (!supportedLangs.includes(toLang)) {
+            throw new Error(`DeepL doesn't support target language: ${targetLang}`);
+        }
+        
+        const response = await axios.post(
+            'https://api-free.deepl.com/v2/translate',
+            new URLSearchParams({
+                auth_key: apiKey,
+                text: text,
+                source_lang: fromLang === 'auto' ? '' : fromLang,
+                target_lang: toLang
+            }),
+            {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                timeout: 8000
+            }
+        );
+        
+        if (response.data && response.data.translations && response.data.translations[0]) {
+            console.log(`✅ Translated with DeepL`);
+            return response.data.translations[0].text;
+        }
+        
+        throw new Error('DeepL translation failed');
+    } catch (error) {
+        console.error('DeepL error:', error.response?.data || error.message);
+        throw error;
+    }
+}
+
+/**
+ * Translate using Azure Translator (Best quality, 2M chars/month free)
+ */
+async function translateWithAzure(text, sourceLang, targetLang) {
+    const apiKey = process.env.AZURE_TRANSLATOR_KEY;
+    const region = process.env.AZURE_TRANSLATOR_REGION;
+    
+    if (!apiKey || !region) {
+        throw new Error('Azure credentials not configured');
+    }
+    
+    try {
+        const response = await axios.post(
+            `https://api.cognitive.microsofttranslator.com/translate?api-version=3.0&from=${sourceLang}&to=${targetLang}`,
+            [{ text: text }],
+            {
+                headers: {
+                    'Ocp-Apim-Subscription-Key': apiKey,
+                    'Ocp-Apim-Subscription-Region': region,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 8000
+            }
+        );
+        
+        if (response.data && response.data[0] && response.data[0].translations[0]) {
+            console.log(`✅ Translated with Azure Translator`);
+            return response.data[0].translations[0].text;
+        }
+        
+        throw new Error('Azure translation failed');
+    } catch (error) {
+        console.error('Azure Translator error:', error.response?.data || error.message);
+        throw error;
+    }
+}
+
+/**
+ * Try LibreTranslate instances (fallback)
  */
 async function translateWithLibre(text, sourceLang, targetLang) {
     for (const instance of config.libreInstances) {
@@ -153,7 +271,7 @@ async function translateWithLibre(text, sourceLang, targetLang) {
             }
         } catch (error) {
             console.log(`⚠️ LibreTranslate instance failed: ${instance}`);
-            continue; // Try next instance
+            continue;
         }
     }
     
@@ -161,7 +279,7 @@ async function translateWithLibre(text, sourceLang, targetLang) {
 }
 
 /**
- * MyMemory fallback
+ * MyMemory fallback (last resort)
  */
 async function translateWithMyMemory(text, sourceLang, targetLang) {
     try {
@@ -219,6 +337,7 @@ function detectLanguage(text) {
 
 /**
  * Main translation function with multi-service fallback
+ * Priority: DeepL → Azure → LibreTranslate → MyMemory
  */
 async function translate(text, sourceLang, targetLang) {
     // Auto-detect if source is 'auto'
@@ -234,13 +353,31 @@ async function translate(text, sourceLang, targetLang) {
         return null;
     }
     
-    // Try LibreTranslate first (better quality)
+    // Try DeepL first (best quality for supported languages)
+    if (process.env.DEEPL_API_KEY) {
+        try {
+            return await translateWithDeepL(text, finalSourceLang, targetLang);
+        } catch (deeplError) {
+            console.log('⚠️ DeepL failed, trying Azure...');
+        }
+    }
+    
+    // Try Azure second (excellent quality, supports more languages)
+    if (process.env.AZURE_TRANSLATOR_KEY) {
+        try {
+            return await translateWithAzure(text, finalSourceLang, targetLang);
+        } catch (azureError) {
+            console.log('⚠️ Azure failed, trying LibreTranslate...');
+        }
+    }
+    
+    // Try LibreTranslate third
     try {
         return await translateWithLibre(text, finalSourceLang, targetLang);
     } catch (libreError) {
         console.log('⚠️ LibreTranslate failed, trying MyMemory...');
         
-        // Fallback to MyMemory
+        // Fallback to MyMemory (last resort)
         try {
             return await translateWithMyMemory(text, finalSourceLang, targetLang);
         } catch (myMemoryError) {
