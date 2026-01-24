@@ -5,136 +5,190 @@ const fs = require('fs');
 require('dotenv').config();
 
 // ==================== CONFIGURATION ====================
-// Use persistent disk path on Render
-const CONFIG_DIR = process.env.RENDER ? '/var/data' : '.';
-const CONFIG_FILE = `${CONFIG_DIR}/config.json`;
-let config = loadConfig();
+// Use Supabase for persistent storage
+let config = {
+    translationPairs: [],
+    translationServices: ['deepl', 'libretranslate', 'mymemory'],
+    libreInstances: [
+        'https://translate.argosopentech.com/translate',
+        'https://libretranslate.com/translate',
+        'https://translate.terraprint.co/translate'
+    ]
+};
 
-// WHITELIST: Add your server IDs here (right-click server → Copy ID)
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY;
+
+// WHITELIST: Add your server IDs here
 const ALLOWED_SERVERS = process.env.ALLOWED_SERVERS 
     ? process.env.ALLOWED_SERVERS.split(',') 
-    : []; // Empty = allow all servers
+    : [];
 
-function loadConfig() {
-    try {
-        // Ensure directory exists on Render
-        if (process.env.RENDER && !fs.existsSync(CONFIG_DIR)) {
-            fs.mkdirSync(CONFIG_DIR, { recursive: true });
-        }
-        
-        if (fs.existsSync(CONFIG_FILE)) {
-            const data = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-            console.log(`📂 Loaded config with ${data.translationPairs?.length || 0} translation pairs`);
-            return data;
-        }
-    } catch (error) {
-        console.error('Error loading config:', error.message);
-    }
-    
-    console.log('📂 Creating new config file');
-    
-    // New structure: array of translation pairs
-    return {
-        translationPairs: [],
-        translationServices: ['azure', 'deepl', 'libretranslate', 'mymemory'],
-        libreInstances: [
-            'https://translate.argosopentech.com/translate',
-            'https://libretranslate.com/translate',
-            'https://translate.terraprint.co/translate'
-        ]
+// Initialize Supabase client if credentials available
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_KEY) {
+    // We'll use axios for Supabase REST API (no need for extra package)
+    supabase = {
+        url: SUPABASE_URL,
+        key: SUPABASE_KEY
     };
+    console.log('✅ Supabase configured for persistent storage');
+} else {
+    console.log('⚠️  WARNING: Supabase not configured - using memory only');
 }
 
-function saveConfig() {
+async function loadConfig() {
+    if (!supabase) {
+        console.log('⚠️  Storage: Memory only (pairs will reset on restart)');
+        return;
+    }
+    
     try {
-        // Ensure directory exists
-        if (process.env.RENDER && !fs.existsSync(CONFIG_DIR)) {
-            fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        // Load translation pairs from Supabase
+        const response = await axios.get(
+            `${supabase.url}/rest/v1/translation_pairs`,
+            {
+                headers: {
+                    'apikey': supabase.key,
+                    'Authorization': `Bearer ${supabase.key}`
+                }
+            }
+        );
+        
+        if (response.data && Array.isArray(response.data)) {
+            config.translationPairs = response.data;
+            console.log(`📂 Loaded ${config.translationPairs.length} translation pairs from Supabase`);
+        }
+    } catch (error) {
+        console.error('❌ Error loading from Supabase:', error.message);
+        console.log('⚠️  Continuing with empty config');
+    }
+}
+
+async function saveConfig() {
+    if (!supabase) {
+        console.log(`💾 Saved to memory (${config.translationPairs?.length || 0} pairs)`);
+        return;
+    }
+    
+    try {
+        // Save all pairs to Supabase
+        // First, delete all existing pairs
+        await axios.delete(
+            `${supabase.url}/rest/v1/translation_pairs?id=neq.0`,
+            {
+                headers: {
+                    'apikey': supabase.key,
+                    'Authorization': `Bearer ${supabase.key}`,
+                    'Prefer': 'return=minimal'
+                }
+            }
+        );
+        
+        // Then insert new pairs
+        if (config.translationPairs.length > 0) {
+            await axios.post(
+                `${supabase.url}/rest/v1/translation_pairs`,
+                config.translationPairs,
+                {
+                    headers: {
+                        'apikey': supabase.key,
+                        'Authorization': `Bearer ${supabase.key}`,
+                        'Content-Type': 'application/json',
+                        'Prefer': 'return=minimal'
+                    }
+                }
+            );
         }
         
-        fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
-        console.log(`✅ Configuration saved (${config.translationPairs?.length || 0} pairs)`);
+        console.log(`✅ Saved ${config.translationPairs.length} pairs to Supabase`);
     } catch (error) {
-        console.error('❌ Error saving config:', error.message);
+        console.error('❌ Error saving to Supabase:', error.response?.data || error.message);
     }
 }
 
-// ==================== WEB SERVER ====================
-const PORT = process.env.PORT || 3000;
+// ==================== WEB SERVER (OPTIONAL - FOR WEB SERVICE TYPE) ====================
+// Only runs if PORT is set (Web Service mode)
+// Not needed for Background Worker mode
+const PORT = process.env.PORT;
 
-const server = http.createServer((req, res) => {
-    if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        const pairCount = config.translationPairs ? config.translationPairs.length : 0;
-        res.end(JSON.stringify({
-            status: 'healthy',
-            uptime: Math.floor(process.uptime()),
-            bot: client.user ? client.user.tag : 'Connecting...',
-            guilds: client.guilds ? client.guilds.cache.size : 0,
-            activePairs: pairCount,
-            timestamp: new Date().toISOString()
-        }));
-    } else {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        const pairCount = config.translationPairs ? config.translationPairs.length : 0;
-        res.end(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Discord Translation Bot</title>
-                <style>
-                    * { margin: 0; padding: 0; box-sizing: border-box; }
-                    body { 
-                        font-family: 'Segoe UI', sans-serif;
-                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                        color: white;
-                        min-height: 100vh;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        padding: 20px;
-                    }
-                    .container { text-align: center; max-width: 600px; }
-                    h1 { font-size: 3em; margin-bottom: 10px; }
-                    .status { 
-                        background: #57F287; 
-                        color: #1e1e1e;
-                        padding: 15px 30px; 
-                        border-radius: 10px; 
-                        display: inline-block; 
-                        margin: 20px 0;
-                        font-weight: bold;
-                    }
-                    .info { 
-                        background: rgba(255,255,255,0.1);
-                        border-radius: 10px;
-                        padding: 20px;
-                        margin-top: 20px;
-                    }
-                    .info p { margin: 8px 0; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <h1>🌍 Translation Bot</h1>
-                    <p>Advanced multi-channel translation</p>
-                    <div class="status">✅ Online & Running</div>
-                    <div class="info">
-                        <p><strong>Bot:</strong> ${client.user ? client.user.tag : 'Connecting...'}</p>
-                        <p><strong>Servers:</strong> ${client.guilds ? client.guilds.cache.size : 0}</p>
-                        <p><strong>Active Pairs:</strong> ${pairCount}</p>
-                        <p><strong>Uptime:</strong> ${Math.floor(process.uptime())}s</p>
+if (PORT) {
+    const server = http.createServer((req, res) => {
+        if (req.url === '/health') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            const pairCount = config.translationPairs ? config.translationPairs.length : 0;
+            res.end(JSON.stringify({
+                status: 'healthy',
+                uptime: Math.floor(process.uptime()),
+                bot: client.user ? client.user.tag : 'Connecting...',
+                guilds: client.guilds ? client.guilds.cache.size : 0,
+                activePairs: pairCount,
+                timestamp: new Date().toISOString()
+            }));
+        } else {
+            res.writeHead(200, { 'Content-Type': 'text/html' });
+            const pairCount = config.translationPairs ? config.translationPairs.length : 0;
+            res.end(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Discord Translation Bot</title>
+                    <style>
+                        * { margin: 0; padding: 0; box-sizing: border-box; }
+                        body { 
+                            font-family: 'Segoe UI', sans-serif;
+                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                            color: white;
+                            min-height: 100vh;
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            padding: 20px;
+                        }
+                        .container { text-align: center; max-width: 600px; }
+                        h1 { font-size: 3em; margin-bottom: 10px; }
+                        .status { 
+                            background: #57F287; 
+                            color: #1e1e1e;
+                            padding: 15px 30px; 
+                            border-radius: 10px; 
+                            display: inline-block; 
+                            margin: 20px 0;
+                            font-weight: bold;
+                        }
+                        .info { 
+                            background: rgba(255,255,255,0.1);
+                            border-radius: 10px;
+                            padding: 20px;
+                            margin-top: 20px;
+                        }
+                        .info p { margin: 8px 0; }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>🌍 Translation Bot</h1>
+                        <p>Advanced multi-channel translation</p>
+                        <div class="status">✅ Online & Running</div>
+                        <div class="info">
+                            <p><strong>Bot:</strong> ${client.user ? client.user.tag : 'Connecting...'}</p>
+                            <p><strong>Servers:</strong> ${client.guilds ? client.guilds.cache.size : 0}</p>
+                            <p><strong>Active Pairs:</strong> ${pairCount}</p>
+                            <p><strong>Uptime:</strong> ${Math.floor(process.uptime())}s</p>
+                        </div>
                     </div>
-                </div>
-            </body>
-            </html>
-        `);
-    }
-});
+                </body>
+                </html>
+            `);
+        }
+    });
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 Web server running on port ${PORT}`);
-});
+    server.listen(PORT, '0.0.0.0', () => {
+        console.log(`🌐 Web server running on port ${PORT}`);
+    });
+} else {
+    console.log(`⚙️ Running in Background Worker mode (no web server)`);
+}
 
 // ==================== DISCORD CLIENT ====================
 const client = new Client({
@@ -148,7 +202,7 @@ const client = new Client({
 // ==================== TRANSLATION FUNCTIONS ====================
 
 /**
- * Translate using DeepL (Excellent quality)
+ * Translate using DeepL (Excellent quality) - Updated to header-based auth
  */
 async function translateWithDeepL(text, sourceLang, targetLang) {
     const apiKey = process.env.DEEPL_API_KEY;
@@ -158,43 +212,44 @@ async function translateWithDeepL(text, sourceLang, targetLang) {
     }
     
     try {
-        // DeepL uses different language codes for some languages
+        // DeepL language code mapping
         const deeplLangMap = {
             'en': 'EN',
             'de': 'DE',
             'fr': 'FR',
             'es': 'ES',
-            'pt': 'PT',
+            'pt': 'PT-PT',
             'it': 'IT',
             'nl': 'NL',
             'pl': 'PL',
             'ru': 'RU',
             'ja': 'JA',
             'zh': 'ZH',
-            'auto': 'auto'
+            'tr': 'TR',
+            'ko': 'KO'
         };
         
-        const fromLang = deeplLangMap[sourceLang] || sourceLang.toUpperCase();
         const toLang = deeplLangMap[targetLang] || targetLang.toUpperCase();
         
-        // Check if DeepL supports these languages
-        const supportedLangs = ['EN', 'DE', 'FR', 'ES', 'PT', 'IT', 'NL', 'PL', 'RU', 'JA', 'ZH', 'KO', 'SV', 'DA', 'FI', 'NO', 'CS', 'BG', 'RO', 'EL', 'TR', 'HU', 'SK', 'SL', 'ET', 'LV', 'LT'];
+        // Supported target languages
+        const supportedLangs = ['EN-US', 'EN-GB', 'DE', 'FR', 'ES', 'PT-PT', 'PT-BR', 'IT', 'NL', 'PL', 'RU', 'JA', 'ZH', 'KO', 'SV', 'DA', 'FI', 'NO', 'CS', 'BG', 'RO', 'EL', 'TR', 'HU', 'SK', 'SL', 'ET', 'LV', 'LT', 'ID', 'UK'];
         
-        if (!supportedLangs.includes(toLang)) {
+        if (!supportedLangs.includes(toLang) && toLang !== 'EN') {
             throw new Error(`DeepL doesn't support target language: ${targetLang}`);
         }
         
+        // Use header-based authentication (new method)
         const response = await axios.post(
             'https://api-free.deepl.com/v2/translate',
-            new URLSearchParams({
-                auth_key: apiKey,
-                text: text,
-                source_lang: fromLang === 'auto' ? '' : fromLang,
-                target_lang: toLang
-            }),
+            {
+                text: [text],
+                target_lang: toLang === 'EN' ? 'EN-US' : toLang,
+                source_lang: sourceLang === 'auto' ? null : deeplLangMap[sourceLang]
+            },
             {
                 headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
+                    'Authorization': `DeepL-Auth-Key ${apiKey}`,
+                    'Content-Type': 'application/json'
                 },
                 timeout: 8000
             }
@@ -208,43 +263,6 @@ async function translateWithDeepL(text, sourceLang, targetLang) {
         throw new Error('DeepL translation failed');
     } catch (error) {
         console.error('DeepL error:', error.response?.data || error.message);
-        throw error;
-    }
-}
-
-/**
- * Translate using Azure Translator (Best quality, 2M chars/month free)
- */
-async function translateWithAzure(text, sourceLang, targetLang) {
-    const apiKey = process.env.AZURE_TRANSLATOR_KEY;
-    const region = process.env.AZURE_TRANSLATOR_REGION;
-    
-    if (!apiKey || !region) {
-        throw new Error('Azure credentials not configured');
-    }
-    
-    try {
-        const response = await axios.post(
-            `https://api.cognitive.microsofttranslator.com/translate?api-version=3.0&from=${sourceLang}&to=${targetLang}`,
-            [{ text: text }],
-            {
-                headers: {
-                    'Ocp-Apim-Subscription-Key': apiKey,
-                    'Ocp-Apim-Subscription-Region': region,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 8000
-            }
-        );
-        
-        if (response.data && response.data[0] && response.data[0].translations[0]) {
-            console.log(`✅ Translated with Azure Translator`);
-            return response.data[0].translations[0].text;
-        }
-        
-        throw new Error('Azure translation failed');
-    } catch (error) {
-        console.error('Azure Translator error:', error.response?.data || error.message);
         throw error;
     }
 }
@@ -337,7 +355,7 @@ function detectLanguage(text) {
 
 /**
  * Main translation function with multi-service fallback
- * Priority: DeepL → Azure → LibreTranslate → MyMemory
+ * Priority: DeepL → LibreTranslate → MyMemory
  */
 async function translate(text, sourceLang, targetLang) {
     // Auto-detect if source is 'auto'
@@ -358,20 +376,11 @@ async function translate(text, sourceLang, targetLang) {
         try {
             return await translateWithDeepL(text, finalSourceLang, targetLang);
         } catch (deeplError) {
-            console.log('⚠️ DeepL failed, trying Azure...');
+            console.log('⚠️ DeepL failed, trying LibreTranslate...');
         }
     }
     
-    // Try Azure second (excellent quality, supports more languages)
-    if (process.env.AZURE_TRANSLATOR_KEY) {
-        try {
-            return await translateWithAzure(text, finalSourceLang, targetLang);
-        } catch (azureError) {
-            console.log('⚠️ Azure failed, trying LibreTranslate...');
-        }
-    }
-    
-    // Try LibreTranslate third
+    // Try LibreTranslate second
     try {
         return await translateWithLibre(text, finalSourceLang, targetLang);
     } catch (libreError) {
@@ -824,6 +833,9 @@ client.once('clientReady', async () => {
     console.log(`✅ Bot logged in as ${client.user.tag}`);
     console.log(`📡 Serving ${client.guilds.cache.size} server(s)`);
     
+    // Load config from Supabase
+    await loadConfig();
+    
     // Show whitelist status
     if (ALLOWED_SERVERS.length > 0) {
         console.log(`🔒 Server whitelist active: ${ALLOWED_SERVERS.length} allowed server(s)`);
@@ -853,7 +865,8 @@ client.once('clientReady', async () => {
     
     const pairCount = config.translationPairs ? config.translationPairs.length : 0;
     const mode = ALLOWED_SERVERS.length > 0 ? '🔒 Private' : '🌐 Public';
-    client.user.setActivity(`${mode} | ${pairCount} pairs`, { type: 3 });
+    const storage = supabase ? '💾 Persistent' : '⚠️ Memory';
+    client.user.setActivity(`${storage} | ${pairCount} pairs`, { type: 3 });
 });
 
 // ==================== ERROR HANDLING ====================
