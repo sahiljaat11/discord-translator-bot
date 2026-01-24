@@ -46,12 +46,14 @@ async function loadConfig() {
     try {
         // Load translation pairs from Supabase
         const response = await axios.get(
-            `${supabase.url}/rest/v1/translation_pairs`,
+            `${supabase.url}/rest/v1/translation_pairs?select=*`,
             {
                 headers: {
                     'apikey': supabase.key,
-                    'Authorization': `Bearer ${supabase.key}`
-                }
+                    'Authorization': `Bearer ${supabase.key}`,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 10000
             }
         );
         
@@ -60,7 +62,7 @@ async function loadConfig() {
             console.log(`📂 Loaded ${config.translationPairs.length} translation pairs from Supabase`);
         }
     } catch (error) {
-        console.error('❌ Error loading from Supabase:', error.message);
+        console.error('❌ Error loading from Supabase:', error.response?.data || error.message);
         console.log('⚠️  Continuing with empty config');
     }
 }
@@ -72,21 +74,22 @@ async function saveConfig() {
     }
     
     try {
-        // Save all pairs to Supabase
-        // First, delete all existing pairs
+        // Delete all existing pairs first
         await axios.delete(
-            `${supabase.url}/rest/v1/translation_pairs?id=neq.0`,
+            `${supabase.url}/rest/v1/translation_pairs?id=neq.`,
             {
                 headers: {
                     'apikey': supabase.key,
                     'Authorization': `Bearer ${supabase.key}`,
+                    'Content-Type': 'application/json',
                     'Prefer': 'return=minimal'
-                }
+                },
+                timeout: 10000
             }
-        );
+        ).catch(() => {}); // Ignore errors if table is empty
         
-        // Then insert new pairs
-        if (config.translationPairs.length > 0) {
+        // Insert new pairs if any exist
+        if (config.translationPairs && config.translationPairs.length > 0) {
             await axios.post(
                 `${supabase.url}/rest/v1/translation_pairs`,
                 config.translationPairs,
@@ -96,7 +99,8 @@ async function saveConfig() {
                         'Authorization': `Bearer ${supabase.key}`,
                         'Content-Type': 'application/json',
                         'Prefer': 'return=minimal'
-                    }
+                    },
+                    timeout: 10000
                 }
             );
         }
@@ -268,6 +272,43 @@ async function translateWithDeepL(text, sourceLang, targetLang) {
 }
 
 /**
+ * Translate using Azure Translator (Good for Hindi, Arabic, Asian languages)
+ */
+async function translateWithAzure(text, sourceLang, targetLang) {
+    const apiKey = process.env.AZURE_TRANSLATOR_KEY;
+    const region = process.env.AZURE_TRANSLATOR_REGION;
+    
+    if (!apiKey || !region) {
+        throw new Error('Azure not configured');
+    }
+    
+    try {
+        const response = await axios.post(
+            `https://api.cognitive.microsofttranslator.com/translate?api-version=3.0&from=${sourceLang}&to=${targetLang}`,
+            [{ text: text }],
+            {
+                headers: {
+                    'Ocp-Apim-Subscription-Key': apiKey,
+                    'Ocp-Apim-Subscription-Region': region,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 10000
+            }
+        );
+        
+        if (response.data?.[0]?.translations?.[0]?.text) {
+            console.log(`✅ Translated with Azure Translator`);
+            return response.data[0].translations[0].text;
+        }
+        
+        throw new Error('Azure translation failed');
+    } catch (error) {
+        console.error('Azure error:', error.response?.data?.error || error.message);
+        throw error;
+    }
+}
+
+/**
  * Try LibreTranslate instances (fallback)
  */
 async function translateWithLibre(text, sourceLang, targetLang) {
@@ -354,8 +395,8 @@ function detectLanguage(text) {
 }
 
 /**
- * Main translation function with multi-service fallback
- * Priority: DeepL → LibreTranslate → MyMemory
+ * Main translation function with smart service selection
+ * Priority: DeepL (European langs) → Azure (Hindi/Arabic/Asian) → LibreTranslate → MyMemory
  */
 async function translate(text, sourceLang, targetLang) {
     // Auto-detect if source is 'auto'
@@ -371,16 +412,38 @@ async function translate(text, sourceLang, targetLang) {
         return null;
     }
     
-    // Try DeepL first (best quality for supported languages)
-    if (process.env.DEEPL_API_KEY) {
+    // Languages not supported by DeepL (use Azure/MyMemory)
+    const deeplUnsupported = ['hi', 'ar', 'th', 'vi', 'id', 'bn', 'ta', 'te', 'ur'];
+    const needsAzure = deeplUnsupported.includes(targetLang) || deeplUnsupported.includes(finalSourceLang);
+    
+    // Try Azure first for Hindi/Arabic/Asian languages
+    if (needsAzure && process.env.AZURE_TRANSLATOR_KEY) {
         try {
-            return await translateWithDeepL(text, finalSourceLang, targetLang);
-        } catch (deeplError) {
-            console.log('⚠️ DeepL failed, trying LibreTranslate...');
+            return await translateWithAzure(text, finalSourceLang, targetLang);
+        } catch (azureError) {
+            console.log('⚠️ Azure failed, trying other services...');
         }
     }
     
-    // Try LibreTranslate second
+    // Try DeepL for European languages
+    if (!needsAzure && process.env.DEEPL_API_KEY) {
+        try {
+            return await translateWithDeepL(text, finalSourceLang, targetLang);
+        } catch (deeplError) {
+            console.log('⚠️ DeepL failed, trying Azure...');
+            
+            // Fallback to Azure even for European languages
+            if (process.env.AZURE_TRANSLATOR_KEY) {
+                try {
+                    return await translateWithAzure(text, finalSourceLang, targetLang);
+                } catch (azureError) {
+                    console.log('⚠️ Azure failed, trying LibreTranslate...');
+                }
+            }
+        }
+    }
+    
+    // Try LibreTranslate
     try {
         return await translateWithLibre(text, finalSourceLang, targetLang);
     } catch (libreError) {
@@ -597,27 +660,27 @@ client.on('interactionCreate', async (interaction) => {
         const embed = new EmbedBuilder()
             .setTitle('🌍 Supported Languages')
             .setColor(0x5865F2)
-            .setDescription('**Use these codes with `/add` command:**')
+            .setDescription('**Translation Services & Support:**')
             .addFields(
                 { 
-                    name: '🇬🇧 Common', 
-                    value: '`en` English\n`hi` Hindi\n`es` Spanish\n`fr` French\n`de` German\n`ar` Arabic', 
-                    inline: true 
+                    name: '🥇 DeepL (Best Quality)', 
+                    value: '`en` `de` `es` `fr` `it` `nl` `pl` `pt` `ru` `ja` `zh` `ko` `tr` `cs` `da` `fi` `no` `sv`\n⚠️ Does NOT support: `hi`, `ar`, `th`, `vi`, `id`', 
+                    inline: false 
                 },
                 { 
-                    name: '🇨🇳 Asian', 
-                    value: '`zh` Chinese\n`ja` Japanese\n`ko` Korean\n`th` Thai\n`vi` Vietnamese\n`id` Indonesian', 
-                    inline: true 
-                },
-                { 
-                    name: '🇪🇺 European', 
-                    value: '`it` Italian\n`pt` Portuguese\n`ru` Russian\n`pl` Polish\n`nl` Dutch\n`tr` Turkish', 
-                    inline: true 
+                    name: '🥈 MyMemory (Fallback)', 
+                    value: 'Supports ALL languages including:\n`hi` Hindi, `ar` Arabic, `th` Thai, `vi` Vietnamese, `id` Indonesian', 
+                    inline: false 
                 },
                 { 
                     name: '🔍 Auto-Detection', 
                     value: '`auto` - Automatically detect source language', 
                     inline: false 
+                },
+                {
+                    name: '💡 Recommendation',
+                    value: 'For Hindi/Arabic: Use `en` as source\nFor European languages: Use `auto`',
+                    inline: false
                 }
             )
             .setFooter({ text: 'Example: /add source:#english target:#hindi source_lang:en target_lang:hi' });
@@ -652,8 +715,11 @@ client.on('interactionCreate', async (interaction) => {
     
     try {
         if (commandName === 'add') {
-            // Defer reply for slow operations
-            await interaction.deferReply({ flags: [4096] });
+            // Respond immediately to avoid timeout
+            await interaction.reply({
+                content: '⏳ Adding translation pair...',
+                flags: [4096]
+            });
             
             const source = interaction.options.getChannel('source');
             const target = interaction.options.getChannel('target');
@@ -714,7 +780,8 @@ client.on('interactionCreate', async (interaction) => {
                 });
             }
             
-            saveConfig();
+            // Save to Supabase in background
+            saveConfig().catch(err => console.error('Background save error:', err));
             
             const direction = bidirectional ? '↔️' : '→';
             const sourceLangDisplay = sourceLang === 'auto' ? 'AUTO' : sourceLang.toUpperCase();
@@ -724,7 +791,10 @@ client.on('interactionCreate', async (interaction) => {
             });
             
         } else if (commandName === 'remove') {
-            await interaction.deferReply({ flags: [4096] });
+            await interaction.reply({
+                content: '⏳ Removing translation pair...',
+                flags: [4096]
+            });
             
             const pairId = interaction.options.getString('pair_id');
             
@@ -741,14 +811,18 @@ client.on('interactionCreate', async (interaction) => {
                 });
             }
             
-            saveConfig();
+            // Save to Supabase in background
+            saveConfig().catch(err => console.error('Background save error:', err));
             
             await interaction.editReply({
                 content: `✅ Translation pair \`${pairId}\` removed!`
             });
             
         } else if (commandName === 'list') {
-            await interaction.deferReply({ flags: [4096] });
+            await interaction.reply({
+                content: '⏳ Loading translation pairs...',
+                flags: [4096]
+            });
             
             // Ensure translationPairs exists
             if (!config.translationPairs) {
@@ -792,10 +866,13 @@ client.on('interactionCreate', async (interaction) => {
                 });
             }
             
-            await interaction.editReply({ embeds: [embed] });
+            await interaction.editReply({ embeds: [embed], content: null });
             
         } else if (commandName === 'clear') {
-            await interaction.deferReply({ flags: [4096] });
+            await interaction.reply({
+                content: '⏳ Clearing all pairs...',
+                flags: [4096]
+            });
             
             // Ensure translationPairs exists
             if (!config.translationPairs) {
@@ -811,7 +888,9 @@ client.on('interactionCreate', async (interaction) => {
             }
             
             config.translationPairs = [];
-            saveConfig();
+            
+            // Save to Supabase in background
+            saveConfig().catch(err => console.error('Background save error:', err));
             
             await interaction.editReply({
                 content: `✅ Cleared **${count}** translation pair(s)!`
