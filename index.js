@@ -8,12 +8,7 @@ require('dotenv').config();
 // Use Supabase for persistent storage
 let config = {
     translationPairs: [],
-    translationServices: ['deepl', 'libretranslate', 'mymemory'],
-    libreInstances: [
-        'https://translate.argosopentech.com/translate',
-        'https://libretranslate.com/translate',
-        'https://translate.terraprint.co/translate'
-    ]
+    translationServices: ['deepl', 'azure', 'mymemory']
 };
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -216,7 +211,7 @@ async function translateWithDeepL(text, sourceLang, targetLang) {
     }
     
     try {
-        // DeepL language code mapping
+        // DeepL language code mapping (updated 2025)
         const deeplLangMap = {
             'en': 'EN',
             'de': 'DE',
@@ -230,43 +225,58 @@ async function translateWithDeepL(text, sourceLang, targetLang) {
             'ja': 'JA',
             'zh': 'ZH',
             'tr': 'TR',
-            'ko': 'KO'
+            'ko': 'KO',
+            'sv': 'SV',
+            'da': 'DA',
+            'fi': 'FI',
+            'no': 'NB',
+            'cs': 'CS',
+            'bg': 'BG',
+            'ro': 'RO',
+            'el': 'EL',
+            'hu': 'HU',
+            'sk': 'SK',
+            'sl': 'SL',
+            'et': 'ET',
+            'lv': 'LV',
+            'lt': 'LT',
+            'id': 'ID',
+            'uk': 'UK'
         };
         
-        const toLang = deeplLangMap[targetLang] || targetLang.toUpperCase();
-        
-        // Supported target languages
-        const supportedLangs = ['EN-US', 'EN-GB', 'DE', 'FR', 'ES', 'PT-PT', 'PT-BR', 'IT', 'NL', 'PL', 'RU', 'JA', 'ZH', 'KO', 'SV', 'DA', 'FI', 'NO', 'CS', 'BG', 'RO', 'EL', 'TR', 'HU', 'SK', 'SL', 'ET', 'LV', 'LT', 'ID', 'UK'];
-        
-        if (!supportedLangs.includes(toLang) && toLang !== 'EN') {
+        // Check if language is supported
+        if (!deeplLangMap[targetLang]) {
             throw new Error(`DeepL doesn't support target language: ${targetLang}`);
         }
+        
+        const toLang = deeplLangMap[targetLang];
+        const fromLang = sourceLang === 'auto' ? null : deeplLangMap[sourceLang];
         
         // Use header-based authentication (new method)
         const response = await axios.post(
             'https://api-free.deepl.com/v2/translate',
             {
                 text: [text],
-                target_lang: toLang === 'EN' ? 'EN-US' : toLang,
-                source_lang: sourceLang === 'auto' ? null : deeplLangMap[sourceLang]
+                target_lang: toLang,
+                source_lang: fromLang || undefined
             },
             {
                 headers: {
                     'Authorization': `DeepL-Auth-Key ${apiKey}`,
                     'Content-Type': 'application/json'
                 },
-                timeout: 8000
+                timeout: 10000
             }
         );
         
-        if (response.data && response.data.translations && response.data.translations[0]) {
+        if (response.data?.translations?.[0]?.text) {
             console.log(`✅ Translated with DeepL`);
             return response.data.translations[0].text;
         }
         
         throw new Error('DeepL translation failed');
     } catch (error) {
-        console.error('DeepL error:', error.response?.data || error.message);
+        console.error('DeepL error:', error.response?.data?.message || error.message);
         throw error;
     }
 }
@@ -306,35 +316,6 @@ async function translateWithAzure(text, sourceLang, targetLang) {
         console.error('Azure error:', error.response?.data?.error || error.message);
         throw error;
     }
-}
-
-/**
- * Try LibreTranslate instances (fallback)
- */
-async function translateWithLibre(text, sourceLang, targetLang) {
-    for (const instance of config.libreInstances) {
-        try {
-            const response = await axios.post(instance, {
-                q: text,
-                source: sourceLang,
-                target: targetLang,
-                format: 'text'
-            }, {
-                timeout: 8000,
-                headers: { 'Content-Type': 'application/json' }
-            });
-            
-            if (response.data.translatedText) {
-                console.log(`✅ Translated with LibreTranslate: ${instance}`);
-                return response.data.translatedText;
-            }
-        } catch (error) {
-            console.log(`⚠️ LibreTranslate instance failed: ${instance}`);
-            continue;
-        }
-    }
-    
-    throw new Error('All LibreTranslate instances failed');
 }
 
 /**
@@ -396,7 +377,7 @@ function detectLanguage(text) {
 
 /**
  * Main translation function with smart service selection
- * Priority: DeepL (European langs) → Azure (Hindi/Arabic/Asian) → LibreTranslate → MyMemory
+ * Priority: DeepL (European langs) → Azure (Hindi/Arabic/Asian) → MyMemory
  */
 async function translate(text, sourceLang, targetLang) {
     // Auto-detect if source is 'auto'
@@ -421,7 +402,7 @@ async function translate(text, sourceLang, targetLang) {
         try {
             return await translateWithAzure(text, finalSourceLang, targetLang);
         } catch (azureError) {
-            console.log('⚠️ Azure failed, trying other services...');
+            console.log('⚠️ Azure failed, using MyMemory...');
         }
     }
     
@@ -437,24 +418,17 @@ async function translate(text, sourceLang, targetLang) {
                 try {
                     return await translateWithAzure(text, finalSourceLang, targetLang);
                 } catch (azureError) {
-                    console.log('⚠️ Azure failed, trying LibreTranslate...');
+                    console.log('⚠️ Azure failed, using MyMemory...');
                 }
             }
         }
     }
     
-    // Try LibreTranslate
+    // Fallback to MyMemory (last resort)
     try {
-        return await translateWithLibre(text, finalSourceLang, targetLang);
-    } catch (libreError) {
-        console.log('⚠️ LibreTranslate failed, trying MyMemory...');
-        
-        // Fallback to MyMemory (last resort)
-        try {
-            return await translateWithMyMemory(text, finalSourceLang, targetLang);
-        } catch (myMemoryError) {
-            throw new Error('All translation services failed');
-        }
+        return await translateWithMyMemory(text, finalSourceLang, targetLang);
+    } catch (myMemoryError) {
+        throw new Error('All translation services failed');
     }
 }
 
