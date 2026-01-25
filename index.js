@@ -39,7 +39,7 @@ async function loadConfig() {
     }
     
     try {
-        // Load translation pairs from Supabase
+        // Load ALL translation pairs from Supabase
         const response = await axios.get(
             `${supabase.url}/rest/v1/translation_pairs?select=*`,
             {
@@ -54,7 +54,7 @@ async function loadConfig() {
         
         if (response.data && Array.isArray(response.data)) {
             config.translationPairs = response.data;
-            console.log(`📂 Loaded ${config.translationPairs.length} translation pairs from Supabase`);
+            console.log(`📂 Loaded ${config.translationPairs.length} translation pairs from Supabase (all servers)`);
         }
     } catch (error) {
         console.error('❌ Error loading from Supabase:', error.response?.data || error.message);
@@ -100,7 +100,8 @@ async function saveConfig() {
             );
         }
         
-        console.log(`✅ Saved ${config.translationPairs.length} pairs to Supabase`);
+        const uniqueGuilds = [...new Set(config.translationPairs.map(p => p.guildId))].length;
+        console.log(`✅ Saved ${config.translationPairs.length} pairs from ${uniqueGuilds} server(s) to Supabase`);
     } catch (error) {
         console.error('❌ Error saving to Supabase:', error.response?.data || error.message);
     }
@@ -435,21 +436,25 @@ async function translate(text, sourceLang, targetLang) {
 // ==================== HELPER FUNCTIONS ====================
 
 /**
- * Find all translation pairs for a channel
+ * Find all translation pairs for a channel (filtered by guild)
  */
-function getTranslationPairsForChannel(channelId) {
-    return config.translationPairs.filter(pair => 
-        pair.sourceChannel === channelId || pair.targetChannel === channelId
+function getTranslationPairsForChannel(channelId, guildId) {
+    if (!config.translationPairs) return [];
+    return config.translationPairs.filter(p => 
+        (p.sourceChannel === channelId || p.targetChannel === channelId) &&
+        p.guildId === guildId
     );
 }
 
 /**
- * Check if translation pair already exists
+ * Check if translation pair already exists in this guild
  */
-function pairExists(sourceId, targetId) {
+function pairExists(sourceId, targetId, guildId) {
+    if (!config.translationPairs) return false;
     return config.translationPairs.some(pair =>
-        (pair.sourceChannel === sourceId && pair.targetChannel === targetId) ||
-        (pair.sourceChannel === targetId && pair.targetChannel === sourceId)
+        ((pair.sourceChannel === sourceId && pair.targetChannel === targetId) ||
+         (pair.sourceChannel === targetId && pair.targetChannel === sourceId)) &&
+        pair.guildId === guildId
     );
 }
 
@@ -483,8 +488,11 @@ client.on('messageCreate', async (message) => {
     // Ensure translationPairs exists
     if (!config.translationPairs || config.translationPairs.length === 0) return;
     
-    // Find all translation pairs where this channel is the source
-    const pairs = config.translationPairs.filter(p => p.sourceChannel === message.channel.id);
+    // Find all translation pairs for this channel IN THIS GUILD ONLY
+    const pairs = config.translationPairs.filter(p => 
+        p.sourceChannel === message.channel.id && 
+        p.guildId === message.guild.id
+    );
     
     if (pairs.length === 0) return;
     
@@ -700,6 +708,7 @@ client.on('interactionCreate', async (interaction) => {
             const sourceLang = interaction.options.getString('source_lang').toLowerCase();
             const targetLang = interaction.options.getString('target_lang').toLowerCase();
             const bidirectional = interaction.options.getBoolean('bidirectional') ?? true;
+            const guildId = interaction.guild.id;
             
             // Validate languages
             const validLangs = ['en', 'hi', 'es', 'fr', 'de', 'ar', 'zh', 'ja', 'ko', 'pt', 'ru', 'it', 'tr', 'pl', 'nl', 'th', 'vi', 'id', 'auto'];
@@ -716,10 +725,10 @@ client.on('interactionCreate', async (interaction) => {
                 });
             }
             
-            // Check if pair already exists
-            if (pairExists(source.id, target.id)) {
+            // Check if pair already exists IN THIS GUILD
+            if (pairExists(source.id, target.id, guildId)) {
                 return interaction.editReply({
-                    content: `⚠️ A translation pair already exists between ${source} and ${target}.\nUse \`/remove\` to delete it first.`
+                    content: `⚠️ A translation pair already exists between ${source} and ${target} in this server.\nUse \`/remove\` to delete it first.`
                 });
             }
             
@@ -728,12 +737,13 @@ client.on('interactionCreate', async (interaction) => {
                 config.translationPairs = [];
             }
             
-            // Create pair ID
-            const pairId = `${source.id}-${target.id}`;
+            // Create pair ID with guild
+            const pairId = `${guildId}-${source.id}-${target.id}`;
             
             // Add forward translation
             config.translationPairs.push({
                 id: pairId,
+                guildId: guildId,
                 sourceChannel: source.id,
                 targetChannel: target.id,
                 sourceLang: sourceLang,
@@ -743,9 +753,10 @@ client.on('interactionCreate', async (interaction) => {
             
             // Add reverse if bidirectional
             if (bidirectional) {
-                const reversePairId = `${target.id}-${source.id}`;
+                const reversePairId = `${guildId}-${target.id}-${source.id}`;
                 config.translationPairs.push({
                     id: reversePairId,
+                    guildId: guildId,
                     sourceChannel: target.id,
                     targetChannel: source.id,
                     sourceLang: targetLang,
