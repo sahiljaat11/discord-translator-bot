@@ -133,11 +133,17 @@ async function translateWithDeepL(text, sourceLang, targetLang) {
     
     if (!langMap[targetLang]) throw new Error(`Unsupported: ${targetLang}`);
     
-    const response = await axios.post('https://api-free.deepl.com/v2/translate', {
+    const params = {
         text: [text],
-        target_lang: langMap[targetLang],
-        source_lang: sourceLang === 'auto' ? undefined : langMap[sourceLang]
-    }, {
+        target_lang: langMap[targetLang]
+    };
+    
+    // PHASE 2 FIX: Only add source_lang if NOT auto
+    if (sourceLang !== 'auto' && langMap[sourceLang]) {
+        params.source_lang = langMap[sourceLang];
+    }
+    
+    const response = await axios.post('https://api-free.deepl.com/v2/translate', params, {
         headers: { 'Authorization': `DeepL-Auth-Key ${apiKey}`, 'Content-Type': 'application/json' },
         timeout: 10000
     });
@@ -185,18 +191,18 @@ async function translate(text, sourceLang, targetLang) {
         return cached.result;
     }
     
-    // Auto-detect
-    let finalSource = sourceLang === 'auto' ? detectLanguage(text) : sourceLang;
+    // PHASE 2 FIX: Skip manual detection for 'auto' - let translation service handle it
+    let finalSource = sourceLang;
     
-    // Skip if same language
-    if (finalSource === targetLang) {
-        console.log(`⏭️ Same language (${finalSource})`);
-        return null;
+    // Only use manual detection as fallback for MyMemory (which needs a source lang)
+    if (sourceLang === 'auto') {
+        // For DeepL, we'll pass 'auto' directly
+        // For MyMemory fallback, we'll detect manually
+        finalSource = 'auto';
     }
     
     // Choose service
-    const useDeepL = SERVICE_CAPABILITIES.deepl.includes(targetLang) && 
-                     SERVICE_CAPABILITIES.deepl.includes(finalSource);
+    const useDeepL = SERVICE_CAPABILITIES.deepl.includes(targetLang);
     
     let result;
     try {
@@ -204,13 +210,29 @@ async function translate(text, sourceLang, targetLang) {
             result = await translateWithDeepL(text, finalSource, targetLang);
             console.log(`✅ DeepL (${finalSource}→${targetLang})`);
         } else {
-            result = await translateWithMyMemory(text, finalSource, targetLang);
-            console.log(`✅ MyMemory (${finalSource}→${targetLang})`);
+            // MyMemory needs explicit source language
+            const myMemorySource = finalSource === 'auto' ? detectLanguage(text) : finalSource;
+            
+            // Skip if detected same as target
+            if (myMemorySource === targetLang) {
+                console.log(`⏭️ Same language detected (${myMemorySource})`);
+                return null;
+            }
+            
+            result = await translateWithMyMemory(text, myMemorySource, targetLang);
+            console.log(`✅ MyMemory (${myMemorySource}→${targetLang})`);
         }
     } catch (error) {
-        // Fallback
+        // Fallback to MyMemory if DeepL fails
         if (useDeepL) {
-            result = await translateWithMyMemory(text, finalSource, targetLang);
+            const myMemorySource = finalSource === 'auto' ? detectLanguage(text) : finalSource;
+            
+            if (myMemorySource === targetLang) {
+                console.log(`⏭️ Same language (${myMemorySource})`);
+                return null;
+            }
+            
+            result = await translateWithMyMemory(text, myMemorySource, targetLang);
             console.log(`✅ MyMemory fallback`);
         } else {
             throw error;
@@ -387,12 +409,13 @@ client.on('interactionCreate', async (interaction) => {
     }
     
     try {
+        // ==================== PHASE 1 FIXES: ADD COMMAND ====================
         if (cmd === 'add') {
             const source = interaction.options.getChannel('source');
             const target = interaction.options.getChannel('target');
             const sourceLang = interaction.options.getString('source_lang').toLowerCase();
             const targetLang = interaction.options.getString('target_lang').toLowerCase();
-            const bidirectional = interaction.options.getBoolean('bidirectional') ?? true;
+            const bidirectional = interaction.options.getBoolean('bidirectional') ?? false; // Changed default to false
             
             // Validation
             if (source.id === target.id) {
@@ -412,14 +435,24 @@ client.on('interactionCreate', async (interaction) => {
             }
             
             const config = guildConfigs.get(guildId);
-            const pairId = `${guildId}-${source.id}-${target.id}`;
             
-            if (config.pairs.some(p => p.id === pairId)) {
-                return interaction.reply({ content: '⚠️ Pair already exists', flags: [4096] });
+            // Generate unique IDs for each direction
+            const forwardId = `${Date.now()}_${source.id}_${target.id}`;
+            const reverseId = `${Date.now() + 1}_${target.id}_${source.id}`;
+            
+            // Check if forward pair already exists
+            const forwardExists = config.pairs.some(p => 
+                p.sourceChannel === source.id && 
+                p.targetChannel === target.id
+            );
+            
+            if (forwardExists) {
+                return interaction.reply({ content: '⚠️ This exact pair already exists', flags: [4096] });
             }
             
+            // Create forward pair
             const newPairs = [{
-                id: pairId,
+                id: forwardId,
                 guildId,
                 sourceChannel: source.id,
                 targetChannel: target.id,
@@ -428,24 +461,42 @@ client.on('interactionCreate', async (interaction) => {
                 createdAt: new Date().toISOString()
             }];
             
+            // Add reverse pair if bidirectional
             if (bidirectional) {
-                newPairs.push({
-                    id: `${guildId}-${target.id}-${source.id}`,
-                    guildId,
-                    sourceChannel: target.id,
-                    targetChannel: source.id,
-                    sourceLang: targetLang,
-                    targetLang: sourceLang,
-                    createdAt: new Date().toISOString()
-                });
+                const reverseExists = config.pairs.some(p => 
+                    p.sourceChannel === target.id && 
+                    p.targetChannel === source.id
+                );
+                
+                if (!reverseExists) {
+                    newPairs.push({
+                        id: reverseId,
+                        guildId,
+                        sourceChannel: target.id,
+                        targetChannel: source.id,
+                        sourceLang: targetLang,
+                        targetLang: sourceLang,
+                        createdAt: new Date().toISOString()
+                    });
+                }
             }
             
             config.pairs.push(...newPairs);
-            upsertPairs(guildId, newPairs);
+            await upsertPairs(guildId, newPairs);
             
-            const dir = bidirectional ? '↔️' : '→';
-            return interaction.reply({ content: `✅ ${source} (${sourceLang.toUpperCase()}) ${dir} ${target} (${targetLang.toUpperCase()})`, flags: [4096] });
+            if (bidirectional && newPairs.length === 2) {
+                return interaction.reply({ 
+                    content: `✅ Created 2 pairs:\n1️⃣ ${source} (${sourceLang.toUpperCase()}) → ${target} (${targetLang.toUpperCase()})\n2️⃣ ${target} (${targetLang.toUpperCase()}) → ${source} (${sourceLang.toUpperCase()})`, 
+                    flags: [4096] 
+                });
+            } else {
+                return interaction.reply({ 
+                    content: `✅ ${source} (${sourceLang.toUpperCase()}) → ${target} (${targetLang.toUpperCase()})`, 
+                    flags: [4096] 
+                });
+            }
             
+        // ==================== PHASE 1 FIXES: LIST COMMAND ====================
         } else if (cmd === 'list') {
             const pairs = getGuildPairs(guildId);
             if (pairs.length === 0) {
@@ -455,42 +506,51 @@ client.on('interactionCreate', async (interaction) => {
             const embed = new EmbedBuilder()
                 .setTitle('📊 Translation Pairs')
                 .setColor(0x5865F2)
-                .setDescription(`**${pairs.length}** pairs in this server`);
+                .setDescription(`**${pairs.length}** pair(s) configured\n*Use \`/remove pair_id:<id>\` to remove*`);
             
-            const seen = new Set();
-            for (const pair of pairs) {
-                const key = [pair.sourceChannel, pair.targetChannel].sort().join('-');
-                if (seen.has(key)) continue;
-                seen.add(key);
-                
-                const reverse = pairs.find(p => p.sourceChannel === pair.targetChannel && p.targetChannel === pair.sourceChannel);
-                const dir = reverse ? '↔️' : '→';
+            // Show each pair individually with its unique ID
+            pairs.forEach((pair, index) => {
+                const sourceChannel = `<#${pair.sourceChannel}>`;
+                const targetChannel = `<#${pair.targetChannel}>`;
+                const arrow = '→';
                 
                 embed.addFields({
-                    name: `<#${pair.sourceChannel}> ${dir} <#${pair.targetChannel}>`,
-                    value: `${pair.sourceLang.toUpperCase()} ${dir} ${pair.targetLang.toUpperCase()}\n\`${pair.id}\``
+                    name: `${index + 1}. ${sourceChannel} ${arrow} ${targetChannel}`,
+                    value: `**Languages:** ${pair.sourceLang.toUpperCase()} → ${pair.targetLang.toUpperCase()}\n**ID:** \`${pair.id}\``,
+                    inline: false
                 });
-            }
+            });
             
             return interaction.reply({ embeds: [embed], flags: [4096] });
             
+        // ==================== PHASE 1 FIXES: REMOVE COMMAND ====================
         } else if (cmd === 'remove') {
-            const pairId = interaction.options.getString('pair_id');
+            const pairIdInput = interaction.options.getString('pair_id');
             const config = guildConfigs.get(guildId);
             
-            if (!config) {
-                return interaction.reply({ content: '❌ No pairs found', flags: [4096] });
+            if (!config || config.pairs.length === 0) {
+                return interaction.reply({ content: '❌ No pairs configured in this server', flags: [4096] });
             }
             
-            const toRemove = config.pairs.filter(p => p.id.includes(pairId));
-            if (toRemove.length === 0) {
-                return interaction.reply({ content: '❌ Pair not found', flags: [4096] });
+            // Find exact match for the pair ID
+            const pairIndex = config.pairs.findIndex(p => p.id === pairIdInput);
+            
+            if (pairIndex === -1) {
+                return interaction.reply({ 
+                    content: `❌ Pair ID \`${pairIdInput}\` not found. Use \`/list\` to see all pairs.`, 
+                    flags: [4096] 
+                });
             }
             
-            config.pairs = config.pairs.filter(p => !p.id.includes(pairId));
-            deletePairs(guildId, toRemove.map(p => p.id));
+            const removedPair = config.pairs[pairIndex];
+            config.pairs.splice(pairIndex, 1);
             
-            return interaction.reply({ content: `✅ Removed ${toRemove.length} pair(s)`, flags: [4096] });
+            await deletePairs(guildId, [removedPair.id]);
+            
+            return interaction.reply({ 
+                content: `✅ Removed: <#${removedPair.sourceChannel}> → <#${removedPair.targetChannel}> (${removedPair.sourceLang.toUpperCase()} → ${removedPair.targetLang.toUpperCase()})`, 
+                flags: [4096] 
+            });
             
         } else if (cmd === 'clear') {
             const config = guildConfigs.get(guildId);
