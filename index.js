@@ -10,8 +10,15 @@ const ALLOWED_SERVERS = process.env.ALLOWED_SERVERS?.split(',') || [];
 const TRANSLATION_COOLDOWN = 2000; // 2 seconds per user/channel
 const CACHE_TTL = 120000; // 2 minutes
 
+// PHASE 3: Reaction translation settings
+const REACTION_COOLDOWN = 60000; // 1 minute cooldown per user
+const MAX_REACTIONS_PER_MINUTE = 3; // Max 3 translations per user per minute
+
 // Guild-specific storage for better performance
 const guildConfigs = new Map(); // Map<guildId, {pairs: [], lastSync: timestamp}>
+
+// PHASE 3: Reaction-enabled channels Map<guildId, Set<channelId>>
+const reactionChannels = new Map();
 
 // Translation cache: Map<cacheKey, {result, timestamp}>
 const translationCache = new Map();
@@ -19,8 +26,51 @@ const translationCache = new Map();
 // Rate limiting: Map<userId-channelId, timestamp>
 const rateLimits = new Map();
 
+// PHASE 3: Reaction rate limiting Map<userId, {count, resetTime}>
+const reactionLimits = new Map();
+
+// PHASE 3: Track translated messages Map<messageId, Set<langCode>>
+const messageTranslations = new Map();
+
 // Recent translations to prevent loops
 const recentTranslations = new Set();
+
+// PHASE 3: Flag emoji to language code mapping
+const FLAG_TO_LANG = {
+    '🇬🇧': 'en', '🇺🇸': 'en', // English
+    '🇪🇸': 'es', '🇲🇽': 'es', // Spanish
+    '🇫🇷': 'fr', // French
+    '🇩🇪': 'de', // German
+    '🇮🇹': 'it', // Italian
+    '🇵🇹': 'pt', '🇧🇷': 'pt', // Portuguese
+    '🇷🇺': 'ru', // Russian
+    '🇯🇵': 'ja', // Japanese
+    '🇨🇳': 'zh', // Chinese
+    '🇰🇷': 'ko', // Korean
+    '🇮🇳': 'hi', // Hindi
+    '🇸🇦': 'ar', // Arabic
+    '🇳🇱': 'nl', // Dutch
+    '🇵🇱': 'pl', // Polish
+    '🇹🇷': 'tr', // Turkish
+    '🇸🇪': 'sv', // Swedish
+    '🇩🇰': 'da', // Danish
+    '🇫🇮': 'fi', // Finnish
+    '🇳🇴': 'no', // Norwegian
+    '🇨🇿': 'cs', // Czech
+    '🇧🇬': 'bg', // Bulgarian
+    '🇷🇴': 'ro', // Romanian
+    '🇬🇷': 'el', // Greek
+    '🇭🇺': 'hu', // Hungarian
+    '🇸🇰': 'sk', // Slovak
+    '🇸🇮': 'sl', // Slovenian
+    '🇪🇪': 'et', // Estonian
+    '🇱🇻': 'lv', // Latvian
+    '🇱🇹': 'lt', // Lithuanian
+    '🇮🇩': 'id', // Indonesian
+    '🇺🇦': 'uk', // Ukrainian
+    '🇹🇭': 'th', // Thai
+    '🇻🇳': 'vi', // Vietnamese
+};
 
 // ==================== SUPABASE FUNCTIONS ====================
 
@@ -51,11 +101,34 @@ async function loadGuildConfig(guildId) {
     }
 }
 
+async function loadReactionChannels(guildId) {
+    if (!SUPABASE_URL || !SUPABASE_KEY) return [];
+    
+    try {
+        const response = await axios.get(
+            `${SUPABASE_URL}/rest/v1/reaction_channels?guildId=eq.${guildId}&select=*`,
+            {
+                headers: {
+                    'apikey': SUPABASE_KEY,
+                    'Authorization': `Bearer ${SUPABASE_KEY}`,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 5000
+            }
+        );
+        
+        console.log(`📂 Loaded ${response.data?.length || 0} reaction channels for guild ${guildId}`);
+        return response.data || [];
+    } catch (error) {
+        console.error(`❌ Load reaction channels error:`, error.message);
+        return [];
+    }
+}
+
 async function upsertPairs(guildId, pairs) {
     if (!SUPABASE_URL || !SUPABASE_KEY || !pairs.length) return;
     
     try {
-        // UPSERT instead of delete+insert
         await axios.post(
             `${SUPABASE_URL}/rest/v1/translation_pairs`,
             pairs,
@@ -73,6 +146,55 @@ async function upsertPairs(guildId, pairs) {
         console.log(`✅ Upserted ${pairs.length} pairs for guild ${guildId}`);
     } catch (error) {
         console.error(`❌ Upsert error:`, error.response?.data || error.message);
+    }
+}
+
+async function upsertReactionChannel(guildId, channelId) {
+    if (!SUPABASE_URL || !SUPABASE_KEY) return;
+    
+    try {
+        await axios.post(
+            `${SUPABASE_URL}/rest/v1/reaction_channels`,
+            [{
+                id: `${guildId}-${channelId}`,
+                guildId,
+                channelId,
+                createdAt: new Date().toISOString()
+            }],
+            {
+                headers: {
+                    'apikey': SUPABASE_KEY,
+                    'Authorization': `Bearer ${SUPABASE_KEY}`,
+                    'Content-Type': 'application/json',
+                    'Prefer': 'resolution=merge-duplicates'
+                },
+                timeout: 5000
+            }
+        );
+        
+        console.log(`✅ Enabled reaction translation for channel ${channelId}`);
+    } catch (error) {
+        console.error(`❌ Upsert reaction channel error:`, error.message);
+    }
+}
+
+async function deleteReactionChannel(guildId, channelId) {
+    if (!SUPABASE_URL || !SUPABASE_KEY) return;
+    
+    try {
+        await axios.delete(
+            `${SUPABASE_URL}/rest/v1/reaction_channels?id=eq.${guildId}-${channelId}`,
+            {
+                headers: {
+                    'apikey': SUPABASE_KEY,
+                    'Authorization': `Bearer ${SUPABASE_KEY}`
+                },
+                timeout: 5000
+            }
+        );
+        console.log(`✅ Disabled reaction translation for channel ${channelId}`);
+    } catch (error) {
+        console.error(`❌ Delete reaction channel error:`, error.message);
     }
 }
 
@@ -115,6 +237,7 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMessageReactions, // PHASE 3: For reaction handling
     ]
 });
 
@@ -138,7 +261,7 @@ async function translateWithDeepL(text, sourceLang, targetLang) {
         target_lang: langMap[targetLang]
     };
     
-    // PHASE 2 FIX: Only add source_lang if NOT auto
+    // Only add source_lang if NOT auto
     if (sourceLang !== 'auto' && langMap[sourceLang]) {
         params.source_lang = langMap[sourceLang];
     }
@@ -191,13 +314,11 @@ async function translate(text, sourceLang, targetLang) {
         return cached.result;
     }
     
-    // PHASE 2 FIX: Skip manual detection for 'auto' - let translation service handle it
+    // Skip manual detection for 'auto' - let translation service handle it
     let finalSource = sourceLang;
     
     // Only use manual detection as fallback for MyMemory (which needs a source lang)
     if (sourceLang === 'auto') {
-        // For DeepL, we'll pass 'auto' directly
-        // For MyMemory fallback, we'll detect manually
         finalSource = 'auto';
     }
     
@@ -284,9 +405,43 @@ function isRateLimited(userId, channelId) {
     return false;
 }
 
+// PHASE 3: Reaction rate limiting
+function isReactionRateLimited(userId) {
+    const now = Date.now();
+    const userLimit = reactionLimits.get(userId);
+    
+    if (!userLimit || now > userLimit.resetTime) {
+        // Reset or initialize
+        reactionLimits.set(userId, { count: 1, resetTime: now + REACTION_COOLDOWN });
+        return false;
+    }
+    
+    if (userLimit.count >= MAX_REACTIONS_PER_MINUTE) {
+        return true;
+    }
+    
+    userLimit.count++;
+    return false;
+}
+
 function markTranslated(messageId) {
     recentTranslations.add(messageId);
     setTimeout(() => recentTranslations.delete(messageId), 30000);
+}
+
+// PHASE 3: Track message-language pairs
+function hasBeenTranslated(messageId, targetLang) {
+    const translations = messageTranslations.get(messageId);
+    return translations?.has(targetLang) || false;
+}
+
+function markMessageTranslated(messageId, targetLang) {
+    if (!messageTranslations.has(messageId)) {
+        messageTranslations.set(messageId, new Set());
+        // Clean up after 1 hour
+        setTimeout(() => messageTranslations.delete(messageId), 3600000);
+    }
+    messageTranslations.get(messageId).add(targetLang);
 }
 
 // ==================== MESSAGE HANDLER ====================
@@ -357,6 +512,86 @@ client.on('messageUpdate', async (oldMsg, newMsg) => {
     client.emit('messageCreate', newMsg);
 });
 
+// ==================== PHASE 3: REACTION HANDLER ====================
+
+client.on('messageReactionAdd', async (reaction, user) => {
+    // Ignore bot reactions
+    if (user.bot) return;
+    
+    // Fetch partial reactions
+    if (reaction.partial) {
+        try {
+            await reaction.fetch();
+        } catch (error) {
+            console.error('Error fetching reaction:', error);
+            return;
+        }
+    }
+    
+    const message = reaction.message;
+    if (!message.guild) return;
+    
+    // Check if reaction translation is enabled for this channel
+    const guildReactionChannels = reactionChannels.get(message.guild.id);
+    if (!guildReactionChannels || !guildReactionChannels.has(message.channel.id)) {
+        return;
+    }
+    
+    // Get language from flag emoji
+    const emoji = reaction.emoji.name;
+    const targetLang = FLAG_TO_LANG[emoji];
+    
+    if (!targetLang) return; // Not a supported flag
+    
+    // Rate limit check
+    if (isReactionRateLimited(user.id)) {
+        console.log(`⏱️ Reaction rate limited: ${user.tag}`);
+        // Optionally send ephemeral message to user
+        return;
+    }
+    
+    // Check if this message-language pair has already been translated
+    if (hasBeenTranslated(message.id, targetLang)) {
+        console.log(`⏭️ Already translated to ${targetLang}`);
+        return;
+    }
+    
+    const text = message.content?.trim();
+    if (!text) return; // No text to translate
+    
+    try {
+        // Translate with auto-detection
+        const translated = await translate(text, 'auto', targetLang);
+        
+        if (!translated) {
+            console.log(`⏭️ No translation needed for ${targetLang}`);
+            return;
+        }
+        
+        // Create embed for translation
+        const embed = new EmbedBuilder()
+            .setAuthor({ 
+                name: `${message.author.displayName}'s message`, 
+                iconURL: message.author.displayAvatarURL() 
+            })
+            .setDescription(translated)
+            .setColor(0x57F287)
+            .setFooter({ text: `AUTO → ${targetLang.toUpperCase()} | Requested by ${user.tag}` })
+            .setTimestamp();
+        
+        // Reply to the original message
+        await message.reply({ embeds: [embed] });
+        
+        // Mark as translated
+        markMessageTranslated(message.id, targetLang);
+        
+        console.log(`✅ Reaction translation: ${targetLang} by ${user.tag}`);
+        
+    } catch (error) {
+        console.error(`❌ Reaction translation failed:`, error.message);
+    }
+});
+
 // ==================== SLASH COMMANDS ====================
 
 const commands = [
@@ -373,7 +608,20 @@ const commands = [
     new SlashCommandBuilder().setName('remove').setDescription('Remove pair').addStringOption(o => o.setName('pair_id').setDescription('Pair ID from /list').setRequired(true)),
     new SlashCommandBuilder().setName('clear').setDescription('Clear all pairs'),
     new SlashCommandBuilder().setName('languages').setDescription('Supported languages'),
-    new SlashCommandBuilder().setName('ping').setDescription('Bot status')
+    new SlashCommandBuilder().setName('ping').setDescription('Bot status'),
+    
+    // PHASE 3: New reaction commands
+    new SlashCommandBuilder()
+        .setName('reaction-enable')
+        .setDescription('Enable reaction-based translation in this channel'),
+    
+    new SlashCommandBuilder()
+        .setName('reaction-disable')
+        .setDescription('Disable reaction-based translation in this channel'),
+    
+    new SlashCommandBuilder()
+        .setName('reaction-list')
+        .setDescription('List channels with reaction translation enabled'),
 ];
 
 client.on('interactionCreate', async (interaction) => {
@@ -394,14 +642,84 @@ client.on('interactionCreate', async (interaction) => {
             .addFields(
                 { name: '🥇 DeepL (Best)', value: '`en` `de` `es` `fr` `it` `nl` `pl` `pt` `ru` `ja` `zh` `ko` `tr` `sv` `da` `fi` `no` `cs` `bg` `ro` `el` `hu` `sk` `sl` `et` `lv` `lt` `id` `uk`' },
                 { name: '🥈 MyMemory (All Others)', value: '`hi` `ar` `th` `vi` `bn` `ta` `te` `ur` and 100+ more' },
-                { name: '🔍 Auto', value: '`auto` - Detects source language automatically' }
+                { name: '🔍 Auto', value: '`auto` - Detects source language automatically' },
+                { name: '🎌 Reaction Flags', value: Object.entries(FLAG_TO_LANG).slice(0, 15).map(([flag, code]) => `${flag} = ${code}`).join(' • ') + '\n*and more...*' }
             );
         return interaction.reply({ embeds: [embed], flags: [4096] });
     }
     
     if (cmd === 'ping') {
         const pairs = getGuildPairs(guildId).length;
-        return interaction.reply({ content: `🏓 Pong! | ${pairs} pairs | ${translationCache.size} cached`, flags: [4096] });
+        const reactionChannelCount = reactionChannels.get(guildId)?.size || 0;
+        return interaction.reply({ content: `🏓 Pong! | ${pairs} pairs | ${reactionChannelCount} reaction channels | ${translationCache.size} cached`, flags: [4096] });
+    }
+    
+    // PHASE 3: Reaction commands (admin only)
+    if (cmd === 'reaction-enable' || cmd === 'reaction-disable' || cmd === 'reaction-list') {
+        if (!isAdmin(interaction.member)) {
+            return interaction.reply({ content: '❌ Admin only', flags: [4096] });
+        }
+    }
+    
+    if (cmd === 'reaction-enable') {
+        const channelId = interaction.channel.id;
+        
+        if (!reactionChannels.has(guildId)) {
+            reactionChannels.set(guildId, new Set());
+        }
+        
+        const guildReactionChannels = reactionChannels.get(guildId);
+        
+        if (guildReactionChannels.has(channelId)) {
+            return interaction.reply({ content: '⚠️ Reaction translation already enabled in this channel', flags: [4096] });
+        }
+        
+        guildReactionChannels.add(channelId);
+        await upsertReactionChannel(guildId, channelId);
+        
+        return interaction.reply({ 
+            content: `✅ Reaction translation enabled in <#${channelId}>!\n\n📌 Users can now react with flag emojis (🇬🇧🇪🇸🇫🇷🇩🇪🇮🇹 etc.) to translate messages.\n⚠️ **Note:** Translations will be visible to everyone in the channel.`, 
+            flags: [4096] 
+        });
+    }
+    
+    if (cmd === 'reaction-disable') {
+        const channelId = interaction.channel.id;
+        const guildReactionChannels = reactionChannels.get(guildId);
+        
+        if (!guildReactionChannels || !guildReactionChannels.has(channelId)) {
+            return interaction.reply({ content: '⚠️ Reaction translation not enabled in this channel', flags: [4096] });
+        }
+        
+        guildReactionChannels.delete(channelId);
+        await deleteReactionChannel(guildId, channelId);
+        
+        return interaction.reply({ 
+            content: `✅ Reaction translation disabled in <#${channelId}>`, 
+            flags: [4096] 
+        });
+    }
+    
+    if (cmd === 'reaction-list') {
+        const guildReactionChannels = reactionChannels.get(guildId);
+        
+        if (!guildReactionChannels || guildReactionChannels.size === 0) {
+            return interaction.reply({ content: '📊 No channels with reaction translation enabled', flags: [4096] });
+        }
+        
+        const embed = new EmbedBuilder()
+            .setTitle('📊 Reaction Translation Channels')
+            .setColor(0x5865F2)
+            .setDescription(`**${guildReactionChannels.size}** channel(s) with reaction translation enabled\n\nUsers can react with flag emojis to translate messages.`);
+        
+        let channelList = '';
+        for (const channelId of guildReactionChannels) {
+            channelList += `• <#${channelId}>\n`;
+        }
+        
+        embed.addFields({ name: 'Enabled Channels', value: channelList || 'None' });
+        
+        return interaction.reply({ embeds: [embed], flags: [4096] });
     }
     
     if (!isAdmin(interaction.member)) {
@@ -409,13 +727,12 @@ client.on('interactionCreate', async (interaction) => {
     }
     
     try {
-        // ==================== PHASE 1 FIXES: ADD COMMAND ====================
         if (cmd === 'add') {
             const source = interaction.options.getChannel('source');
             const target = interaction.options.getChannel('target');
             const sourceLang = interaction.options.getString('source_lang').toLowerCase();
             const targetLang = interaction.options.getString('target_lang').toLowerCase();
-            const bidirectional = interaction.options.getBoolean('bidirectional') ?? false; // Changed default to false
+            const bidirectional = interaction.options.getBoolean('bidirectional') ?? false;
             
             // Validation
             if (source.id === target.id) {
@@ -496,7 +813,6 @@ client.on('interactionCreate', async (interaction) => {
                 });
             }
             
-        // ==================== PHASE 1 FIXES: LIST COMMAND ====================
         } else if (cmd === 'list') {
             const pairs = getGuildPairs(guildId);
             if (pairs.length === 0) {
@@ -523,7 +839,6 @@ client.on('interactionCreate', async (interaction) => {
             
             return interaction.reply({ embeds: [embed], flags: [4096] });
             
-        // ==================== PHASE 1 FIXES: REMOVE COMMAND ====================
         } else if (cmd === 'remove') {
             const pairIdInput = interaction.options.getString('pair_id');
             const config = guildConfigs.get(guildId);
@@ -582,6 +897,11 @@ client.once('clientReady', async () => {
     for (const guild of client.guilds.cache.values()) {
         const pairs = await loadGuildConfig(guild.id);
         guildConfigs.set(guild.id, { pairs, lastSync: Date.now() });
+        
+        // PHASE 3: Load reaction channels
+        const reactionChannelData = await loadReactionChannels(guild.id);
+        const channelSet = new Set(reactionChannelData.map(rc => rc.channelId));
+        reactionChannels.set(guild.id, channelSet);
     }
     
     // Register commands
@@ -601,6 +921,11 @@ client.once('clientReady', async () => {
 client.on('guildCreate', async (guild) => {
     const pairs = await loadGuildConfig(guild.id);
     guildConfigs.set(guild.id, { pairs, lastSync: Date.now() });
+    
+    // PHASE 3: Load reaction channels
+    const reactionChannelData = await loadReactionChannels(guild.id);
+    const channelSet = new Set(reactionChannelData.map(rc => rc.channelId));
+    reactionChannels.set(guild.id, channelSet);
 });
 
 // ==================== ERROR HANDLING ====================
