@@ -11,13 +11,13 @@ const TRANSLATION_COOLDOWN = 2000; // 2 seconds per user/channel
 const CACHE_TTL = 120000; // 2 minutes
 
 // PHASE 3: Reaction translation settings
-const REACTION_COOLDOWN = 60000; // 1 minute cooldown per user
-const MAX_REACTIONS_PER_MINUTE = 3; // Max 3 translations per user per minute
+const REACTION_COOLDOWN = 30000; // 30 seconds per user per message per language
+const MAX_REACTIONS_PER_MINUTE = 5; // Max 5 translations per user per minute per channel
 
 // Guild-specific storage for better performance
 const guildConfigs = new Map(); // Map<guildId, {pairs: [], lastSync: timestamp}>
 
-// PHASE 3: Reaction-enabled channels Map<guildId, Set<channelId>>
+// PHASE 3: Reaction-enabled channels Map<guildId, Map<channelId, {cooldownEnabled}>>
 const reactionChannels = new Map();
 
 // Translation cache: Map<cacheKey, {result, timestamp}>
@@ -26,10 +26,10 @@ const translationCache = new Map();
 // Rate limiting: Map<userId-channelId, timestamp>
 const rateLimits = new Map();
 
-// PHASE 3: Reaction rate limiting Map<userId, {count, resetTime}>
+// PHASE 3: Granular reaction rate limiting Map<userId-guildId-channelId, {count, resetTime}>
 const reactionLimits = new Map();
 
-// PHASE 3: Track translated messages Map<messageId, Set<langCode>>
+// PHASE 3: Track translated messages Map<messageId-langCode, timestamp>
 const messageTranslations = new Map();
 
 // Recent translations to prevent loops
@@ -405,14 +405,18 @@ function isRateLimited(userId, channelId) {
     return false;
 }
 
-// PHASE 3: Reaction rate limiting
-function isReactionRateLimited(userId) {
+// PHASE 3: Granular reaction rate limiting - per user per channel
+function isReactionRateLimited(userId, guildId, channelId, cooldownEnabled) {
+    // If cooldown is disabled for this channel, no rate limiting
+    if (!cooldownEnabled) return false;
+    
+    const key = `${userId}-${guildId}-${channelId}`;
     const now = Date.now();
-    const userLimit = reactionLimits.get(userId);
+    const userLimit = reactionLimits.get(key);
     
     if (!userLimit || now > userLimit.resetTime) {
         // Reset or initialize
-        reactionLimits.set(userId, { count: 1, resetTime: now + REACTION_COOLDOWN });
+        reactionLimits.set(key, { count: 1, resetTime: now + REACTION_COOLDOWN });
         return false;
     }
     
@@ -429,19 +433,28 @@ function markTranslated(messageId) {
     setTimeout(() => recentTranslations.delete(messageId), 30000);
 }
 
-// PHASE 3: Track message-language pairs
+// PHASE 3: Track message-language pairs to prevent duplicate translations
 function hasBeenTranslated(messageId, targetLang) {
-    const translations = messageTranslations.get(messageId);
-    return translations?.has(targetLang) || false;
+    const key = `${messageId}-${targetLang}`;
+    const timestamp = messageTranslations.get(key);
+    
+    if (!timestamp) return false;
+    
+    // Check if translation is recent (within last 5 minutes)
+    if (Date.now() - timestamp > 300000) {
+        messageTranslations.delete(key);
+        return false;
+    }
+    
+    return true;
 }
 
 function markMessageTranslated(messageId, targetLang) {
-    if (!messageTranslations.has(messageId)) {
-        messageTranslations.set(messageId, new Set());
-        // Clean up after 1 hour
-        setTimeout(() => messageTranslations.delete(messageId), 3600000);
-    }
-    messageTranslations.get(messageId).add(targetLang);
+    const key = `${messageId}-${targetLang}`;
+    messageTranslations.set(key, Date.now());
+    
+    // Clean up old entries after 10 minutes
+    setTimeout(() => messageTranslations.delete(key), 600000);
 }
 
 // ==================== MESSAGE HANDLER ====================
@@ -537,16 +550,20 @@ client.on('messageReactionAdd', async (reaction, user) => {
         return;
     }
     
+    // Get channel config to check cooldown setting
+    const channelConfig = guildReactionChannels.get(message.channel.id);
+    const cooldownEnabled = channelConfig?.cooldownEnabled ?? true;
+    
     // Get language from flag emoji
     const emoji = reaction.emoji.name;
     const targetLang = FLAG_TO_LANG[emoji];
     
     if (!targetLang) return; // Not a supported flag
     
-    // Rate limit check
-    if (isReactionRateLimited(user.id)) {
-        console.log(`⏱️ Reaction rate limited: ${user.tag}`);
-        // Optionally send ephemeral message to user
+    // Rate limit check (per user per channel)
+    if (isReactionRateLimited(user.id, message.guild.id, message.channel.id, cooldownEnabled)) {
+        console.log(`⏱️ Reaction rate limited: ${user.tag} in channel ${message.channel.id}`);
+        // Optionally notify user via DM or ephemeral message
         return;
     }
     
@@ -585,7 +602,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
         // Mark as translated
         markMessageTranslated(message.id, targetLang);
         
-        console.log(`✅ Reaction translation: ${targetLang} by ${user.tag}`);
+        console.log(`✅ Reaction translation: ${targetLang} by ${user.tag} in ${message.guild.name}/#${message.channel.name}`);
         
     } catch (error) {
         console.error(`❌ Reaction translation failed:`, error.message);
@@ -613,11 +630,21 @@ const commands = [
     // PHASE 3: New reaction commands
     new SlashCommandBuilder()
         .setName('reaction-enable')
-        .setDescription('Enable reaction-based translation in this channel'),
+        .setDescription('Enable reaction-based translation in this channel')
+        .addBooleanOption(o => o.setName('cooldown').setDescription('Enable rate limiting? (default: true)')),
+    
+    new SlashCommandBuilder()
+        .setName('reaction-enable-all')
+        .setDescription('Enable reaction translation in ALL channels of this server')
+        .addBooleanOption(o => o.setName('cooldown').setDescription('Enable rate limiting? (default: true)')),
     
     new SlashCommandBuilder()
         .setName('reaction-disable')
         .setDescription('Disable reaction-based translation in this channel'),
+    
+    new SlashCommandBuilder()
+        .setName('reaction-disable-all')
+        .setDescription('Disable reaction translation in ALL channels of this server'),
     
     new SlashCommandBuilder()
         .setName('reaction-list')
@@ -655,7 +682,8 @@ client.on('interactionCreate', async (interaction) => {
     }
     
     // PHASE 3: Reaction commands (admin only)
-    if (cmd === 'reaction-enable' || cmd === 'reaction-disable' || cmd === 'reaction-list') {
+    if (cmd === 'reaction-enable' || cmd === 'reaction-disable' || cmd === 'reaction-list' || 
+        cmd === 'reaction-enable-all' || cmd === 'reaction-disable-all') {
         if (!isAdmin(interaction.member)) {
             return interaction.reply({ content: '❌ Admin only', flags: [4096] });
         }
@@ -663,9 +691,10 @@ client.on('interactionCreate', async (interaction) => {
     
     if (cmd === 'reaction-enable') {
         const channelId = interaction.channel.id;
+        const cooldownEnabled = interaction.options.getBoolean('cooldown') ?? true;
         
         if (!reactionChannels.has(guildId)) {
-            reactionChannels.set(guildId, new Set());
+            reactionChannels.set(guildId, new Map());
         }
         
         const guildReactionChannels = reactionChannels.get(guildId);
@@ -674,11 +703,47 @@ client.on('interactionCreate', async (interaction) => {
             return interaction.reply({ content: '⚠️ Reaction translation already enabled in this channel', flags: [4096] });
         }
         
-        guildReactionChannels.add(channelId);
-        await upsertReactionChannel(guildId, channelId);
+        guildReactionChannels.set(channelId, { cooldownEnabled });
+        await upsertReactionChannel(guildId, channelId, cooldownEnabled);
+        
+        const cooldownMsg = cooldownEnabled 
+            ? `\n⏱️ **Cooldown:** ${MAX_REACTIONS_PER_MINUTE} translations per minute per user` 
+            : '\n🚀 **Cooldown:** Disabled (unlimited translations)';
         
         return interaction.reply({ 
-            content: `✅ Reaction translation enabled in <#${channelId}>!\n\n📌 Users can now react with flag emojis (🇬🇧🇪🇸🇫🇷🇩🇪🇮🇹 etc.) to translate messages.\n⚠️ **Note:** Translations will be visible to everyone in the channel.`, 
+            content: `✅ Reaction translation enabled in <#${channelId}>!\n\n📌 Users can now react with flag emojis (🇬🇧🇪🇸🇫🇷🇩🇪🇮🇹 etc.) to translate messages.${cooldownMsg}\n⚠️ **Note:** Translations will be visible to everyone in the channel.`, 
+            flags: [4096] 
+        });
+    }
+    
+    if (cmd === 'reaction-enable-all') {
+        const cooldownEnabled = interaction.options.getBoolean('cooldown') ?? true;
+        
+        if (!reactionChannels.has(guildId)) {
+            reactionChannels.set(guildId, new Map());
+        }
+        
+        const guildReactionChannels = reactionChannels.get(guildId);
+        const guild = interaction.guild;
+        
+        // Get all text channels
+        const textChannels = guild.channels.cache.filter(ch => ch.isTextBased() && !ch.isThread());
+        
+        let enabledCount = 0;
+        for (const [channelId, channel] of textChannels) {
+            if (!guildReactionChannels.has(channelId)) {
+                guildReactionChannels.set(channelId, { cooldownEnabled });
+                await upsertReactionChannel(guildId, channelId, cooldownEnabled);
+                enabledCount++;
+            }
+        }
+        
+        const cooldownMsg = cooldownEnabled 
+            ? `\n⏱️ **Cooldown:** ${MAX_REACTIONS_PER_MINUTE} translations per minute per user per channel` 
+            : '\n🚀 **Cooldown:** Disabled (unlimited translations)';
+        
+        return interaction.reply({ 
+            content: `✅ Reaction translation enabled in **${enabledCount}** channels!${cooldownMsg}\n\n📌 Users can now react with flag emojis to translate messages across the entire server.`, 
             flags: [4096] 
         });
     }
@@ -700,6 +765,28 @@ client.on('interactionCreate', async (interaction) => {
         });
     }
     
+    if (cmd === 'reaction-disable-all') {
+        const guildReactionChannels = reactionChannels.get(guildId);
+        
+        if (!guildReactionChannels || guildReactionChannels.size === 0) {
+            return interaction.reply({ content: '⚠️ No channels with reaction translation enabled', flags: [4096] });
+        }
+        
+        const count = guildReactionChannels.size;
+        
+        // Delete all reaction channels for this guild
+        for (const channelId of guildReactionChannels.keys()) {
+            await deleteReactionChannel(guildId, channelId);
+        }
+        
+        guildReactionChannels.clear();
+        
+        return interaction.reply({ 
+            content: `✅ Reaction translation disabled in **${count}** channel(s)`, 
+            flags: [4096] 
+        });
+    }
+    
     if (cmd === 'reaction-list') {
         const guildReactionChannels = reactionChannels.get(guildId);
         
@@ -713,8 +800,9 @@ client.on('interactionCreate', async (interaction) => {
             .setDescription(`**${guildReactionChannels.size}** channel(s) with reaction translation enabled\n\nUsers can react with flag emojis to translate messages.`);
         
         let channelList = '';
-        for (const channelId of guildReactionChannels) {
-            channelList += `• <#${channelId}>\n`;
+        for (const [channelId, config] of guildReactionChannels) {
+            const cooldownStatus = config.cooldownEnabled ? '⏱️ Cooldown ON' : '🚀 No Cooldown';
+            channelList += `• <#${channelId}> - ${cooldownStatus}\n`;
         }
         
         embed.addFields({ name: 'Enabled Channels', value: channelList || 'None' });
@@ -898,17 +986,28 @@ client.once('clientReady', async () => {
         const pairs = await loadGuildConfig(guild.id);
         guildConfigs.set(guild.id, { pairs, lastSync: Date.now() });
         
-        // PHASE 3: Load reaction channels
+        // PHASE 3: Load reaction channels as Map with config
         const reactionChannelData = await loadReactionChannels(guild.id);
-        const channelSet = new Set(reactionChannelData.map(rc => rc.channelId));
-        reactionChannels.set(guild.id, channelSet);
+        const channelMap = new Map();
+        for (const rc of reactionChannelData) {
+            channelMap.set(rc.channelId, { 
+                cooldownEnabled: rc.cooldownEnabled ?? true 
+            });
+        }
+        reactionChannels.set(guild.id, channelMap);
     }
     
     // Register commands
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     try {
+        // Clear old commands first
+        await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
+        console.log('🔄 Cleared old commands');
+        
+        // Register new commands
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log('✅ Commands registered');
+        console.log('✅ Commands registered (including reaction commands)');
+        console.log(`📋 Total commands: ${commands.length}`);
     } catch (error) {
         console.error('❌ Command registration failed:', error);
     }
@@ -922,10 +1021,15 @@ client.on('guildCreate', async (guild) => {
     const pairs = await loadGuildConfig(guild.id);
     guildConfigs.set(guild.id, { pairs, lastSync: Date.now() });
     
-    // PHASE 3: Load reaction channels
+    // PHASE 3: Load reaction channels as Map with config
     const reactionChannelData = await loadReactionChannels(guild.id);
-    const channelSet = new Set(reactionChannelData.map(rc => rc.channelId));
-    reactionChannels.set(guild.id, channelSet);
+    const channelMap = new Map();
+    for (const rc of reactionChannelData) {
+        channelMap.set(rc.channelId, { 
+            cooldownEnabled: rc.cooldownEnabled ?? true 
+        });
+    }
+    reactionChannels.set(guild.id, channelMap);
 });
 
 // ==================== ERROR HANDLING ====================
