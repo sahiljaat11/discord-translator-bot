@@ -1045,4 +1045,17 @@ if (!token) {
     process.exit(1);
 }
 
-client.login(token);
+console.log('🔑 Attempting to login to Discord...');
+console.log(`📝 Token exists: ${token ? 'YES' : 'NO'}`);
+console.log(`📝 Token length: ${token?.length || 0}`);
+
+client.login(token)
+    .then(() => {
+        console.log('✅ Successfully logged in to Discord');
+    })
+    .catch(error => {
+        console.error('❌ CRITICAL: Failed to login to Discord');
+        console.error('Error details:', error.message);
+        console.error('Full error:', error);
+        process.exit(1);
+    });
