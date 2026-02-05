@@ -242,7 +242,26 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMessageReactions, // PHASE 3: For reaction handling
-    ]
+    ],
+    // Add WebSocket options for better debugging
+    ws: {
+        properties: {
+            browser: 'Discord.js'
+        }
+    }
+});
+
+// Add debug event listeners
+client.on('debug', info => {
+    if (info.includes('Hit a 429') || info.includes('Trying to reconnect')) {
+        console.log('🔍 DEBUG:', info);
+    }
+});
+
+client.on('warn', info => console.log('⚠️ WARNING:', info));
+
+client.on('rateLimit', info => {
+    console.log('⏱️ RATE LIMIT:', JSON.stringify(info));
 });
 
 // ==================== TRANSLATION SERVICES ====================
@@ -1069,6 +1088,18 @@ if (!token) {
 console.log('🔑 Attempting to login to Discord...');
 console.log(`📝 Token exists: ${token ? 'YES' : 'NO'}`);
 console.log(`📝 Token length: ${token?.length || 0}`);
+console.log(`📝 Token preview: ${token ? token.substring(0, 20) + '...' : 'N/A'}`);
+console.log(`📝 Node version: ${process.version}`);
+console.log(`📝 Discord.js version: ${require('discord.js').version}`);
+
+// Test basic network connectivity
+console.log('🌐 Testing network connectivity...');
+const https = require('https');
+https.get('https://discord.com/api/v10/gateway', (res) => {
+    console.log(`✅ Discord API reachable (status: ${res.statusCode})`);
+}).on('error', (err) => {
+    console.error('❌ Cannot reach Discord API:', err.message);
+});
 
 // Set a timeout for login (30 seconds)
 const loginTimeout = setTimeout(() => {
@@ -1077,6 +1108,7 @@ const loginTimeout = setTimeout(() => {
     console.error('1. Invalid token');
     console.error('2. Network issues');
     console.error('3. Discord API is down');
+    console.error('4. Missing Gateway Intents in Discord Developer Portal');
     process.exit(1);
 }, 30000);
 
@@ -1089,10 +1121,12 @@ client.login(token)
     .catch(error => {
         clearTimeout(loginTimeout);
         console.error('❌ CRITICAL: Failed to login to Discord');
+        console.error('Error name:', error.name);
         console.error('Error code:', error.code);
         console.error('Error message:', error.message);
+        console.error('Error stack:', error.stack);
         
-        if (error.code === 'TokenInvalid') {
+        if (error.code === 'TokenInvalid' || error.message?.includes('token')) {
             console.error('');
             console.error('🔧 FIX: Your Discord token is invalid!');
             console.error('1. Go to https://discord.com/developers/applications');
@@ -1100,6 +1134,17 @@ client.login(token)
             console.error('3. Go to Bot → Reset Token');
             console.error('4. Copy the new token');
             console.error('5. Update DISCORD_TOKEN in Render environment variables');
+        }
+        
+        if (error.code === 'DisallowedIntents') {
+            console.error('');
+            console.error('🔧 FIX: Enable Privileged Gateway Intents!');
+            console.error('1. Go to https://discord.com/developers/applications');
+            console.error('2. Select your bot → Bot section');
+            console.error('3. Enable: MESSAGE CONTENT INTENT');
+            console.error('4. Enable: SERVER MEMBERS INTENT');
+            console.error('5. Enable: PRESENCE INTENT');
+            console.error('6. Click Save Changes');
         }
         
         process.exit(1);
