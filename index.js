@@ -223,12 +223,16 @@ async function deletePairs(guildId, pairIds) {
 // ==================== WEB SERVER ====================
 const PORT = process.env.PORT;
 
-if (PORT) {
-    const server = http.createServer((req, res) => {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end(`Bot Online | ${guildConfigs.size} servers`);
-    });
-    server.listen(PORT, '0.0.0.0', () => console.log(`🌐 Server on port ${PORT}`));
+let httpServer;
+
+function startWebServer() {
+    if (PORT && !httpServer) {
+        httpServer = http.createServer((req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end(`Bot Online | ${guildConfigs.size} servers | Status: ${client.isReady() ? 'Connected' : 'Connecting'}`);
+        });
+        httpServer.listen(PORT, '0.0.0.0', () => console.log(`🌐 Server on port ${PORT}`));
+    }
 }
 
 // ==================== DISCORD CLIENT ====================
@@ -981,6 +985,9 @@ client.once('clientReady', async () => {
     console.log(`✅ ${client.user.tag} online`);
     console.log(`📡 ${client.guilds.cache.size} server(s)`);
     
+    // Start web server AFTER Discord connection is successful
+    startWebServer();
+    
     // Load configs for all guilds
     for (const guild of client.guilds.cache.values()) {
         const pairs = await loadGuildConfig(guild.id);
@@ -1034,8 +1041,22 @@ client.on('guildCreate', async (guild) => {
 
 // ==================== ERROR HANDLING ====================
 
-client.on('error', error => console.error('Discord error:', error));
-process.on('unhandledRejection', error => console.error('Unhandled rejection:', error));
+client.on('error', error => {
+    console.error('❌ Discord client error:', error);
+});
+
+client.on('shardError', error => {
+    console.error('❌ Discord shard error:', error);
+});
+
+process.on('unhandledRejection', error => {
+    console.error('❌ Unhandled rejection:', error);
+});
+
+process.on('uncaughtException', error => {
+    console.error('❌ Uncaught exception:', error);
+    process.exit(1);
+});
 
 // ==================== START ====================
 
@@ -1049,13 +1070,37 @@ console.log('🔑 Attempting to login to Discord...');
 console.log(`📝 Token exists: ${token ? 'YES' : 'NO'}`);
 console.log(`📝 Token length: ${token?.length || 0}`);
 
+// Set a timeout for login (30 seconds)
+const loginTimeout = setTimeout(() => {
+    console.error('❌ TIMEOUT: Discord login took more than 30 seconds');
+    console.error('This usually means:');
+    console.error('1. Invalid token');
+    console.error('2. Network issues');
+    console.error('3. Discord API is down');
+    process.exit(1);
+}, 30000);
+
 client.login(token)
     .then(() => {
-        console.log('✅ Successfully logged in to Discord');
+        clearTimeout(loginTimeout);
+        console.log('✅ Successfully sent login request to Discord');
+        console.log('⏳ Waiting for ready event...');
     })
     .catch(error => {
+        clearTimeout(loginTimeout);
         console.error('❌ CRITICAL: Failed to login to Discord');
-        console.error('Error details:', error.message);
-        console.error('Full error:', error);
+        console.error('Error code:', error.code);
+        console.error('Error message:', error.message);
+        
+        if (error.code === 'TokenInvalid') {
+            console.error('');
+            console.error('🔧 FIX: Your Discord token is invalid!');
+            console.error('1. Go to https://discord.com/developers/applications');
+            console.error('2. Select your bot');
+            console.error('3. Go to Bot → Reset Token');
+            console.error('4. Copy the new token');
+            console.error('5. Update DISCORD_TOKEN in Render environment variables');
+        }
+        
         process.exit(1);
     });
